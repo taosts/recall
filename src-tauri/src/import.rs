@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
+use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
-use chrono::{DateTime, TimeZone, Utc};
 
+use crate::db::{find_by_url, upsert_artifact};
 use crate::models::{Artifact, BrowserInfo, ImportStats};
-use crate::db::{upsert_artifact, find_by_url};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Browser path resolution
@@ -18,12 +18,20 @@ fn local_app_data() -> Option<PathBuf> {
 fn browser_paths(browser_id: &str) -> Option<(PathBuf, PathBuf)> {
     let base = local_app_data()?;
     let profile = match browser_id {
-        "edge"   => base.join("Microsoft").join("Edge").join("User Data").join("Default"),
-        "chrome" => base.join("Google").join("Chrome").join("User Data").join("Default"),
+        "edge" => base
+            .join("Microsoft")
+            .join("Edge")
+            .join("User Data")
+            .join("Default"),
+        "chrome" => base
+            .join("Google")
+            .join("Chrome")
+            .join("User Data")
+            .join("Default"),
         _ => return None,
     };
     let bookmarks = profile.join("Bookmarks");
-    let history   = profile.join("History");
+    let history = profile.join("History");
     Some((bookmarks, history))
 }
 
@@ -36,12 +44,12 @@ pub fn detect_browsers() -> Vec<BrowserInfo> {
             Some(BrowserInfo {
                 id: id.to_string(),
                 name: match id {
-                    "edge"   => "Microsoft Edge".to_string(),
+                    "edge" => "Microsoft Edge".to_string(),
                     "chrome" => "Google Chrome".to_string(),
-                    _        => id.to_string(),
+                    _ => id.to_string(),
                 },
                 bookmarks_path: bk.to_string_lossy().into_owned(),
-                history_path:   hi.to_string_lossy().into_owned(),
+                history_path: hi.to_string_lossy().into_owned(),
                 available: bk.exists() || hi.exists(),
             })
         })
@@ -83,8 +91,8 @@ pub fn import_bookmarks(
     conn: &Connection,
     batch: &str,
 ) -> Result<ImportStats, String> {
-    let (bk_path, _) = browser_paths(browser)
-        .ok_or_else(|| format!("Unknown browser: {}", browser))?;
+    let (bk_path, _) =
+        browser_paths(browser).ok_or_else(|| format!("Unknown browser: {}", browser))?;
 
     if !bk_path.exists() {
         return Err(format!("Bookmarks file not found: {}", bk_path.display()));
@@ -92,8 +100,8 @@ pub fn import_bookmarks(
 
     let raw = std::fs::read_to_string(&bk_path)
         .map_err(|e| format!("Failed to read bookmarks: {}", e))?;
-    let json: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("Failed to parse bookmarks JSON: {}", e))?;
+    let json: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse bookmarks JSON: {}", e))?;
 
     let mut stats = ImportStats {
         browser: browser.to_string(),
@@ -125,36 +133,42 @@ fn walk_bookmark_node(
 
     match node_type {
         "url" => {
-            let url   = node["url"].as_str().unwrap_or("").to_string();
+            let url = node["url"].as_str().unwrap_or("").to_string();
             let title = node["name"].as_str().map(|s| s.to_string());
 
             if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
                 return;
             }
 
-            let date_added = node["date_added"].as_str()
+            let date_added = node["date_added"]
+                .as_str()
                 .and_then(|s| s.parse::<i64>().ok())
                 .and_then(filetime_micros_to_iso);
-            let date_last_used = node["date_last_used"].as_str()
+            let date_last_used = node["date_last_used"]
+                .as_str()
                 .and_then(|s| s.parse::<i64>().ok())
                 .filter(|&v| v > 0)
                 .and_then(filetime_micros_to_iso);
 
             let now = Utc::now().to_rfc3339();
             let artifact = Artifact {
-                id:           Uuid::new_v4().to_string(),
-                r#type:       "bookmark".to_string(),
+                id: Uuid::new_v4().to_string(),
+                r#type: "bookmark".to_string(),
                 title,
-                domain:       extract_domain(&url),
-                url:          Some(url.clone()),
-                created_at:   date_added.clone().unwrap_or_else(|| now.clone()),
-                visited_at:   date_last_used.or(date_added),
+                domain: extract_domain(&url),
+                url: Some(url.clone()),
+                created_at: date_added.clone().unwrap_or_else(|| now.clone()),
+                visited_at: date_last_used.or(date_added),
                 is_bookmarked: true,
-                visit_count:  0,
-                source:       Some(browser.to_string()),
-                content:      None,
-                user_note:    None,
-                folder_path:  if folder_path.is_empty() { None } else { Some(folder_path.to_string()) },
+                visit_count: 0,
+                source: Some(browser.to_string()),
+                content: None,
+                user_note: None,
+                folder_path: if folder_path.is_empty() {
+                    None
+                } else {
+                    Some(folder_path.to_string())
+                },
                 import_batch: Some(batch.to_string()),
             };
 
@@ -168,12 +182,10 @@ fn walk_bookmark_node(
                     );
                     stats.duplicates_skipped += 1;
                 }
-                Ok(None) => {
-                    match upsert_artifact(conn, &artifact) {
-                        Ok(_) => stats.bookmarks_imported += 1,
-                        Err(e) => stats.errors.push(format!("Insert error: {}", e)),
-                    }
-                }
+                Ok(None) => match upsert_artifact(conn, &artifact) {
+                    Ok(_) => stats.bookmarks_imported += 1,
+                    Err(e) => stats.errors.push(format!("Insert error: {}", e)),
+                },
                 Err(e) => stats.errors.push(format!("DB error: {}", e)),
             }
         }
@@ -206,8 +218,8 @@ pub fn import_history(
     batch: &str,
     limit_days: Option<i64>,
 ) -> Result<ImportStats, String> {
-    let (_, hi_path) = browser_paths(browser)
-        .ok_or_else(|| format!("Unknown browser: {}", browser))?;
+    let (_, hi_path) =
+        browser_paths(browser).ok_or_else(|| format!("Unknown browser: {}", browser))?;
 
     if !hi_path.exists() {
         return Err(format!("History file not found: {}", hi_path.display()));
@@ -235,10 +247,8 @@ fn read_history_from_copy(
 ) -> Result<ImportStats, String> {
     use rusqlite::{Connection as RConn, OpenFlags};
 
-    let src = RConn::open_with_flags(
-        copy_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ).map_err(|e| format!("Failed to open History copy: {}", e))?;
+    let src = RConn::open_with_flags(copy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("Failed to open History copy: {}", e))?;
 
     let mut stats = ImportStats {
         browser: browser.to_string(),
@@ -269,10 +279,12 @@ fn read_history_from_copy(
         r#"SELECT u.url, u.title, u.visit_count, u.last_visit_time
            FROM urls u
            WHERE u.hidden = 0
-           ORDER BY u.last_visit_time DESC"#.to_string()
+           ORDER BY u.last_visit_time DESC"#
+            .to_string()
     };
 
-    let mut stmt = src.prepare(&sql)
+    let mut stmt = src
+        .prepare(&sql)
         .map_err(|e| format!("Failed to prepare History query: {}", e))?;
 
     let rows_result: Result<Vec<(String, Option<String>, i64, i64)>, _> = stmt
@@ -286,8 +298,7 @@ fn read_history_from_copy(
         })
         .and_then(|it| it.collect());
 
-    let rows = rows_result
-        .map_err(|e| format!("Failed to read History rows: {}", e))?;
+    let rows = rows_result.map_err(|e| format!("Failed to read History rows: {}", e))?;
 
     let now = Utc::now().to_rfc3339();
 
@@ -300,34 +311,35 @@ fn read_history_from_copy(
         let domain = extract_domain(&url);
 
         let artifact = Artifact {
-            id:           Uuid::new_v4().to_string(),
-            r#type:       "history".to_string(),
+            id: Uuid::new_v4().to_string(),
+            r#type: "history".to_string(),
             title,
             domain,
-            url:          Some(url.clone()),
-            created_at:   now.clone(),
+            url: Some(url.clone()),
+            created_at: now.clone(),
             visited_at,
             is_bookmarked: false,
             visit_count,
-            source:       Some(browser.to_string()),
-            content:      None,
-            user_note:    None,
-            folder_path:  None,
+            source: Some(browser.to_string()),
+            content: None,
+            user_note: None,
+            folder_path: None,
             import_batch: Some(batch.to_string()),
         };
 
         match find_by_url(conn, &url) {
-            Ok(Some(_)) => { stats.duplicates_skipped += 1; }
-            Ok(None) => {
-                match upsert_artifact(conn, &artifact) {
-                    Ok(_) => stats.history_imported += 1,
-                    Err(e) => stats.errors.push(format!("Insert error for {}: {}", url, e)),
-                }
+            Ok(Some(_)) => {
+                stats.duplicates_skipped += 1;
             }
+            Ok(None) => match upsert_artifact(conn, &artifact) {
+                Ok(_) => stats.history_imported += 1,
+                Err(e) => stats
+                    .errors
+                    .push(format!("Insert error for {}: {}", url, e)),
+            },
             Err(e) => stats.errors.push(format!("DB lookup error: {}", e)),
         }
     }
-
 
     Ok(stats)
 }
@@ -340,22 +352,34 @@ mod tests {
 
     #[test]
     fn test_domain_simple_https() {
-        assert_eq!(extract_domain("https://example.com/path"), Some("example.com".into()));
+        assert_eq!(
+            extract_domain("https://example.com/path"),
+            Some("example.com".into())
+        );
     }
 
     #[test]
     fn test_domain_http() {
-        assert_eq!(extract_domain("http://example.com"), Some("example.com".into()));
+        assert_eq!(
+            extract_domain("http://example.com"),
+            Some("example.com".into())
+        );
     }
 
     #[test]
     fn test_domain_strips_www() {
-        assert_eq!(extract_domain("https://www.example.com/x"), Some("example.com".into()));
+        assert_eq!(
+            extract_domain("https://www.example.com/x"),
+            Some("example.com".into())
+        );
     }
 
     #[test]
     fn test_domain_strips_port() {
-        assert_eq!(extract_domain("https://localhost:8080/api"), Some("localhost".into()));
+        assert_eq!(
+            extract_domain("https://localhost:8080/api"),
+            Some("localhost".into())
+        );
     }
 
     #[test]
@@ -379,7 +403,10 @@ mod tests {
 
     #[test]
     fn test_domain_lowercase() {
-        assert_eq!(extract_domain("https://EXAMPLE.COM"), Some("example.com".into()));
+        assert_eq!(
+            extract_domain("https://EXAMPLE.COM"),
+            Some("example.com".into())
+        );
     }
 
     // ── filetime_micros_to_iso ──────────────────────────────────────────
@@ -390,14 +417,22 @@ mod tests {
         // chrome_micros = (unix_secs + FILETIME_TO_UNIX_OFFSET) * 1_000_000
         let micros: i64 = (1_704_067_200_i64 + FILETIME_TO_UNIX_OFFSET) * 1_000_000;
         let iso = filetime_micros_to_iso(micros).expect("should parse");
-        assert!(iso.contains("2024-01-01"), "expected 2024-01-01, got {}", iso);
+        assert!(
+            iso.contains("2024-01-01"),
+            "expected 2024-01-01, got {}",
+            iso
+        );
     }
 
     #[test]
     fn test_filetime_zero() {
         // 0 microseconds → 1601-01-01T00:00:00 UTC (Windows FILETIME epoch)
         let iso = filetime_micros_to_iso(0).expect("should parse epoch 1601");
-        assert!(iso.contains("1601-01-01"), "expected 1601-01-01, got {}", iso);
+        assert!(
+            iso.contains("1601-01-01"),
+            "expected 1601-01-01, got {}",
+            iso
+        );
     }
 
     #[test]
