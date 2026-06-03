@@ -150,7 +150,10 @@ mod tests {
         assert!(roundtripped.is_bookmarked);
         assert_eq!(roundtripped.visit_count, 42);
         assert_eq!(roundtripped.source.as_deref(), Some("edge"));
-        assert_eq!(roundtripped.folder_path.as_deref(), Some("Bookmarks Bar/Dev/Rust"));
+        assert_eq!(
+            roundtripped.folder_path.as_deref(),
+            Some("Bookmarks Bar/Dev/Rust")
+        );
     }
 
     #[test]

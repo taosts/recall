@@ -115,10 +115,15 @@ mod tests {
                     is_bookmarked, visit_count, source)
                VALUES (?1, 'history', ?2, ?3, ?4, ?5, ?5, ?6, 1, 'edge')"#,
             rusqlite::params![
-                id, title, url, domain, visited_at,
+                id,
+                title,
+                url,
+                domain,
+                visited_at,
                 if is_bookmarked { 1 } else { 0 },
             ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     /// Insert a cluster of artifacts spaced `spacing_min` minutes apart,
@@ -161,34 +166,45 @@ mod tests {
         let conn = test_db();
 
         // Verify artifacts table exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM artifacts", [], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
 
         // Verify quests table exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM quests", [], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM quests", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
 
         // Verify quest_artifacts table exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM quest_artifacts", [], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM quest_artifacts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
     }
 
     #[test]
     fn test_artifact_insert_and_fts_trigger() {
         let conn = test_db();
-        insert_artifact(&conn, "a1", "ZFS Cache Guide", "https://example.com/zfs", "example.com", "2025-12-03T10:00:00", false);
+        insert_artifact(
+            &conn,
+            "a1",
+            "ZFS Cache Guide",
+            "https://example.com/zfs",
+            "example.com",
+            "2025-12-03T10:00:00",
+            false,
+        );
 
         // FTS should be populated by trigger
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM artifacts_fts WHERE artifacts_fts MATCH '\"ZFS\"'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts_fts WHERE artifacts_fts MATCH '\"ZFS\"'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1, "FTS trigger should index the title");
     }
 
@@ -207,8 +223,24 @@ mod tests {
     fn test_generate_quests_too_few_artifacts() {
         let conn = test_db();
         // Only 2 artifacts — below MIN_ARTIFACTS_PER_QUEST (3)
-        insert_artifact(&conn, "a1", "Page 1", "https://a.com/1", "a.com", "2025-12-03T10:00:00", false);
-        insert_artifact(&conn, "a2", "Page 2", "https://a.com/2", "a.com", "2025-12-03T10:05:00", false);
+        insert_artifact(
+            &conn,
+            "a1",
+            "Page 1",
+            "https://a.com/1",
+            "a.com",
+            "2025-12-03T10:00:00",
+            false,
+        );
+        insert_artifact(
+            &conn,
+            "a2",
+            "Page 2",
+            "https://a.com/2",
+            "a.com",
+            "2025-12-03T10:05:00",
+            false,
+        );
 
         let created = quest::generate_quests(&conn).unwrap();
         assert_eq!(created, 0, "Fewer than 3 artifacts should not form a Quest");
@@ -226,7 +258,10 @@ mod tests {
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         assert_eq!(quests.len(), 1);
         assert_eq!(quests[0].artifact_count, 5);
-        assert!(quests[0].anchor_count >= 1, "First artifact was bookmarked → anchor");
+        assert!(
+            quests[0].anchor_count >= 1,
+            "First artifact was bookmarked → anchor"
+        );
     }
 
     #[test]
@@ -253,10 +288,21 @@ mod tests {
         let conn = test_db();
         // 20 artifacts, 30 minutes apart → total duration = 9.5 hours > MAX_QUEST_DURATION_HOURS (8)
         // Expect at least 2 Quests due to the 8h hard cap
-        insert_cluster(&conn, "long", 20, "2025-12-03T08:00:00", 30, "stackoverflow.com");
+        insert_cluster(
+            &conn,
+            "long",
+            20,
+            "2025-12-03T08:00:00",
+            30,
+            "stackoverflow.com",
+        );
 
         let created = quest::generate_quests(&conn).unwrap();
-        assert!(created >= 2, "8h max duration should force-split long browsing sessions, got {}", created);
+        assert!(
+            created >= 2,
+            "8h max duration should force-split long browsing sessions, got {}",
+            created
+        );
     }
 
     #[test]
@@ -294,8 +340,10 @@ mod tests {
         assert_eq!(full.status, "auto");
         // Artifacts should be time-ordered
         for i in 1..full.artifacts.len() {
-            assert!(full.artifacts[i].visited_at >= full.artifacts[i-1].visited_at,
-                "Artifacts should be sorted by visited_at ASC");
+            assert!(
+                full.artifacts[i].visited_at >= full.artifacts[i - 1].visited_at,
+                "Artifacts should be sorted by visited_at ASC"
+            );
         }
     }
 
@@ -328,7 +376,11 @@ mod tests {
 
         // Archived Quests should not appear in list
         let quests_after = quest::list_quests(&conn, 10, 0).unwrap();
-        assert_eq!(quests_after.len(), 0, "Archived Quest should be hidden from list");
+        assert_eq!(
+            quests_after.len(),
+            0,
+            "Archived Quest should be hidden from list"
+        );
     }
 
     #[test]
@@ -362,8 +414,15 @@ mod tests {
 
         // The confirmed Quest should survive
         let after = quest::list_quests(&conn, 10, 0).unwrap();
-        let confirmed: Vec<_> = after.iter().filter(|q| q.display_name == "Learning Python").collect();
-        assert_eq!(confirmed.len(), 1, "Confirmed (user-renamed) Quest should survive regeneration");
+        let confirmed: Vec<_> = after
+            .iter()
+            .filter(|q| q.display_name == "Learning Python")
+            .collect();
+        assert_eq!(
+            confirmed.len(),
+            1,
+            "Confirmed (user-renamed) Quest should survive regeneration"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -437,7 +496,8 @@ mod tests {
         let name = &quests[0].display_name;
         assert!(
             name.to_lowercase().contains("rust") || name.contains("rust-lang"),
-            "Auto-name '{}' should reference the primary domain 'rust-lang.org'", name
+            "Auto-name '{}' should reference the primary domain 'rust-lang.org'",
+            name
         );
     }
 
@@ -448,59 +508,144 @@ mod tests {
     #[test]
     fn test_search_returns_results() {
         let conn = test_db();
-        insert_artifact(&conn, "s1", "OpenWrt DNS configuration guide",
-            "https://openwrt.org/docs/dns", "openwrt.org", "2025-12-03T10:00:00", true);
-        insert_artifact(&conn, "s2", "Rust programming tutorial",
-            "https://doc.rust-lang.org/book", "doc.rust-lang.org", "2025-12-03T10:05:00", false);
+        insert_artifact(
+            &conn,
+            "s1",
+            "OpenWrt DNS configuration guide",
+            "https://openwrt.org/docs/dns",
+            "openwrt.org",
+            "2025-12-03T10:00:00",
+            true,
+        );
+        insert_artifact(
+            &conn,
+            "s2",
+            "Rust programming tutorial",
+            "https://doc.rust-lang.org/book",
+            "doc.rust-lang.org",
+            "2025-12-03T10:05:00",
+            false,
+        );
 
         let results = search::search(&conn, "OpenWrt DNS", None, None, None, 30).unwrap();
-        assert!(!results.is_empty(), "FTS search for 'OpenWrt DNS' should find the matching artifact");
+        assert!(
+            !results.is_empty(),
+            "FTS search for 'OpenWrt DNS' should find the matching artifact"
+        );
         assert_eq!(results[0].artifact.domain, Some("openwrt.org".to_string()));
     }
 
     #[test]
     fn test_search_empty_query_errors_at_fts_layer() {
         let conn = test_db();
-        insert_artifact(&conn, "e1", "Some page", "https://a.com", "a.com", "2025-12-03T10:00:00", false);
+        insert_artifact(
+            &conn,
+            "e1",
+            "Some page",
+            "https://a.com",
+            "a.com",
+            "2025-12-03T10:00:00",
+            false,
+        );
         // The empty-query guard is in lib.rs (Tauri command layer), not search::search().
         // Direct FTS5 call with empty/whitespace input should return an error.
         let result = search::search(&conn, "   ", None, None, None, 30);
-        assert!(result.is_err(), "Raw FTS5 search with empty query should error (guard is in lib.rs)");
+        assert!(
+            result.is_err(),
+            "Raw FTS5 search with empty query should error (guard is in lib.rs)"
+        );
     }
 
     #[test]
     fn test_context_window() {
         let conn = test_db();
         // Insert 3 artifacts: 10:00, 10:10, 12:00
-        insert_artifact(&conn, "ctx1", "Page A", "https://a.com", "a.com", "2025-12-03T10:00:00", false);
-        insert_artifact(&conn, "ctx2", "Page B", "https://b.com", "b.com", "2025-12-03T10:10:00", false);
-        insert_artifact(&conn, "ctx3", "Page C", "https://c.com", "c.com", "2025-12-03T12:00:00", false);
+        insert_artifact(
+            &conn,
+            "ctx1",
+            "Page A",
+            "https://a.com",
+            "a.com",
+            "2025-12-03T10:00:00",
+            false,
+        );
+        insert_artifact(
+            &conn,
+            "ctx2",
+            "Page B",
+            "https://b.com",
+            "b.com",
+            "2025-12-03T10:10:00",
+            false,
+        );
+        insert_artifact(
+            &conn,
+            "ctx3",
+            "Page C",
+            "https://c.com",
+            "c.com",
+            "2025-12-03T12:00:00",
+            false,
+        );
 
         // Context of ctx1 with 30-min window should include ctx2 but NOT ctx3
         let context = search::get_context(&conn, "ctx1", 30).unwrap();
         let context_ids: Vec<&str> = context.iter().map(|a| a.id.as_str()).collect();
-        assert!(context_ids.contains(&"ctx2"), "ctx2 (10 min away) should be in 30-min context");
-        assert!(!context_ids.contains(&"ctx3"), "ctx3 (2 hours away) should NOT be in 30-min context");
+        assert!(
+            context_ids.contains(&"ctx2"),
+            "ctx2 (10 min away) should be in 30-min context"
+        );
+        assert!(
+            !context_ids.contains(&"ctx3"),
+            "ctx3 (2 hours away) should NOT be in 30-min context"
+        );
     }
 
     #[test]
     fn test_user_note_roundtrip() {
         let conn = test_db();
-        insert_artifact(&conn, "note1", "Some page", "https://a.com", "a.com", "2025-12-03T10:00:00", false);
+        insert_artifact(
+            &conn,
+            "note1",
+            "Some page",
+            "https://a.com",
+            "a.com",
+            "2025-12-03T10:00:00",
+            false,
+        );
 
         search::set_user_note(&conn, "note1", "This was useful for debugging").unwrap();
 
         // Search and verify note is returned
         let results = search::search(&conn, "page", None, None, None, 30).unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0].artifact.user_note, Some("This was useful for debugging".to_string()));
+        assert_eq!(
+            results[0].artifact.user_note,
+            Some("This was useful for debugging".to_string())
+        );
     }
 
     #[test]
     fn test_db_stats() {
         let conn = test_db();
-        insert_artifact(&conn, "st1", "Page 1", "https://a.com/1", "a.com", "2025-12-03T10:00:00", true);
-        insert_artifact(&conn, "st2", "Page 2", "https://a.com/2", "a.com", "2025-12-04T10:00:00", false);
+        insert_artifact(
+            &conn,
+            "st1",
+            "Page 1",
+            "https://a.com/1",
+            "a.com",
+            "2025-12-03T10:00:00",
+            true,
+        );
+        insert_artifact(
+            &conn,
+            "st2",
+            "Page 2",
+            "https://a.com/2",
+            "a.com",
+            "2025-12-04T10:00:00",
+            false,
+        );
 
         let stats = search::get_stats(&conn).unwrap();
         assert_eq!(stats.total_artifacts, 2);
@@ -519,7 +664,14 @@ mod tests {
 
         // Step 1: Simulate importing browsing data
         insert_cluster(&conn, "e2e-zfs", 5, "2025-12-03T20:00:00", 8, "reddit.com");
-        insert_cluster(&conn, "e2e-openwrt", 4, "2025-12-04T14:00:00", 10, "openwrt.org");
+        insert_cluster(
+            &conn,
+            "e2e-openwrt",
+            4,
+            "2025-12-04T14:00:00",
+            10,
+            "openwrt.org",
+        );
 
         // Step 2: Search works
         let results = search::search(&conn, "reddit", None, None, None, 30).unwrap();
@@ -550,6 +702,10 @@ mod tests {
         // Step 8: Archive one Quest
         quest::archive_quest(&conn, &quests[1].id).unwrap();
         let remaining = quest::list_quests(&conn, 10, 0).unwrap();
-        assert_eq!(remaining.len(), 1, "Only non-archived Quest should remain in list");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "Only non-archived Quest should remain in list"
+        );
     }
 }

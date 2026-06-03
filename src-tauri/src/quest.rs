@@ -2,10 +2,10 @@
 // quest.rs — Quest (探索任务) System
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use rusqlite::{Connection, Result, params};
-use uuid::Uuid;
-use crate::models::{Quest, QuestSummary, Artifact};
+use crate::models::{Artifact, Quest, QuestSummary};
 use crate::search::row_to_artifact;
+use rusqlite::{params, Connection, Result};
+use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -149,7 +149,11 @@ fn auto_name_quest(conn: &Connection, cluster: &[&Artifact]) -> Result<String> {
     }
 
     // Get top 2-3 most frequent non-generic domains
-    let placeholders: Vec<String> = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let placeholders: Vec<String> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         r#"SELECT domain, COUNT(*) as cnt
            FROM artifacts
@@ -163,14 +167,11 @@ fn auto_name_quest(conn: &Connection, cluster: &[&Artifact]) -> Result<String> {
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let domain_rows = stmt.query_map(
-        rusqlite::params_from_iter(ids.iter()),
-        |row| {
-            let domain: String = row.get(0)?;
-            let count: i64 = row.get(1)?;
-            Ok((domain, count))
-        },
-    )?;
+    let domain_rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+        let domain: String = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        Ok((domain, count))
+    })?;
 
     let mut domains: Vec<String> = Vec::new();
     for dr in domain_rows {
@@ -189,16 +190,22 @@ fn auto_name_quest(conn: &Connection, cluster: &[&Artifact]) -> Result<String> {
 
     let mut keyword = String::new();
     if !anchor_ids.is_empty() {
-        let a_placeholders: Vec<String> = anchor_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let a_placeholders: Vec<String> = anchor_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
         let a_sql = format!(
             r#"SELECT title FROM artifacts WHERE id IN ({}) AND title IS NOT NULL LIMIT 1"#,
             a_placeholders.join(",")
         );
         let mut a_stmt = conn.prepare(&a_sql)?;
-        let title: Option<String> = a_stmt.query_row(
-            rusqlite::params_from_iter(anchor_ids.iter()),
-            |row| row.get(0),
-        ).ok().flatten();
+        let title: Option<String> = a_stmt
+            .query_row(rusqlite::params_from_iter(anchor_ids.iter()), |row| {
+                row.get(0)
+            })
+            .ok()
+            .flatten();
 
         if let Some(t) = title {
             // Extract a meaningful word from title
@@ -222,7 +229,10 @@ fn auto_name_quest(conn: &Connection, cluster: &[&Artifact]) -> Result<String> {
     let name = match (domains.is_empty(), keyword.is_empty()) {
         (true, true) => {
             // Fallback to date range
-            let start = cluster.first().and_then(|a| a.visited_at.as_deref()).unwrap_or("?");
+            let start = cluster
+                .first()
+                .and_then(|a| a.visited_at.as_deref())
+                .unwrap_or("?");
             let start_short = &start[..start.len().min(10)]; // "YYYY-MM-DD"
             format!("{} browsing", start_short)
         }
@@ -237,7 +247,10 @@ fn auto_name_quest(conn: &Connection, cluster: &[&Artifact]) -> Result<String> {
 /// Extract a meaningful keyword from a title string.
 fn extract_keyword(title: &str) -> String {
     // Split by common delimiters and find the longest non-noise word
-    let noise: &[&str] = &["the", "a", "an", "is", "of", "to", "in", "for", "on", "and", "or", "with", "how", "what", "why", "guide", "tutorial", "howto"];
+    let noise: &[&str] = &[
+        "the", "a", "an", "is", "of", "to", "in", "for", "on", "and", "or", "with", "how", "what",
+        "why", "guide", "tutorial", "howto",
+    ];
 
     let mut best = String::new();
     for part in title.split(|c: char| !c.is_alphanumeric()) {
@@ -295,23 +308,24 @@ pub fn list_quests(conn: &Connection, limit: i64, offset: i64) -> Result<Vec<Que
 
 pub fn get_quest(conn: &Connection, quest_id: &str) -> Result<Quest> {
     // Fetch quest header
-    let (id, name, auto_name, started_at, ended_at, status, created_at, updated_at) = conn.query_row(
-        r#"SELECT id, name, auto_name, started_at, ended_at, status, created_at, updated_at
+    let (id, name, auto_name, started_at, ended_at, status, created_at, updated_at) = conn
+        .query_row(
+            r#"SELECT id, name, auto_name, started_at, ended_at, status, created_at, updated_at
            FROM quests WHERE id = ?1"#,
-        params![quest_id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-            ))
-        },
-    )?;
+            params![quest_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )?;
 
     // Fetch artifacts in timeline order
     let mut stmt = conn.prepare(
@@ -362,27 +376,40 @@ pub fn rename_quest(conn: &Connection, quest_id: &str, name: &str) -> Result<()>
 
 pub fn merge_quests(conn: &Connection, quest_ids: Vec<String>) -> Result<String> {
     if quest_ids.len() < 2 {
-        return Err(rusqlite::Error::InvalidParameterName("need at least 2 quest IDs".into()));
+        return Err(rusqlite::Error::InvalidParameterName(
+            "need at least 2 quest IDs".into(),
+        ));
     }
 
     // Find the survivor: the Quest with the earliest started_at
-    let placeholders: Vec<String> = quest_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let placeholders: Vec<String> = quest_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         r#"SELECT id FROM quests WHERE id IN ({}) ORDER BY started_at ASC LIMIT 1"#,
         placeholders.join(",")
     );
 
-    let survivor: String = conn.query_row(
-        &sql,
-        rusqlite::params_from_iter(quest_ids.iter()),
-        |row| row.get(0),
-    )?;
+    let survivor: String =
+        conn.query_row(&sql, rusqlite::params_from_iter(quest_ids.iter()), |row| {
+            row.get(0)
+        })?;
 
     // Collect absorbed IDs (all except survivor)
-    let absorbed: Vec<&str> = quest_ids.iter().filter(|id| **id != survivor).map(|s| s.as_str()).collect();
+    let absorbed: Vec<&str> = quest_ids
+        .iter()
+        .filter(|id| **id != survivor)
+        .map(|s| s.as_str())
+        .collect();
 
     // Move artifact associations to survivor
-    let abs_placeholders: Vec<String> = absorbed.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let abs_placeholders: Vec<String> = absorbed
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let update_sql = format!(
         r#"UPDATE quest_artifacts SET quest_id = ?{} WHERE quest_id IN ({})"#,
         absorbed.len() + 1,
@@ -394,7 +421,8 @@ pub fn merge_quests(conn: &Connection, quest_ids: Vec<String>) -> Result<String>
         all_params.push(Box::new(a.to_string()));
     }
     all_params.push(Box::new(survivor.clone()));
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        all_params.iter().map(|p| p.as_ref()).collect();
     conn.execute(&update_sql, param_refs.as_slice())?;
 
     // Delete absorbed Quests
@@ -402,7 +430,10 @@ pub fn merge_quests(conn: &Connection, quest_ids: Vec<String>) -> Result<String>
         r#"DELETE FROM quests WHERE id IN ({})"#,
         abs_placeholders.join(",")
     );
-    let abs_params: Vec<&dyn rusqlite::types::ToSql> = absorbed.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+    let abs_params: Vec<&dyn rusqlite::types::ToSql> = absorbed
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
     conn.execute(&del_sql, abs_params.as_slice())?;
 
     // Recalculate started_at / ended_at for survivor

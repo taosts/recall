@@ -1,15 +1,17 @@
 pub mod db;
-pub mod models;
 pub mod import;
-pub mod search;
+pub mod models;
 pub mod quest;
+pub mod search;
 
+use rusqlite::Connection;
 use std::sync::Mutex;
 use tauri::{Manager, State};
-use rusqlite::Connection;
 use uuid::Uuid;
 
-use crate::models::{SearchResult, Artifact, ImportStats, BrowserInfo, DbStats, Quest, QuestSummary};
+use crate::models::{
+    Artifact, BrowserInfo, DbStats, ImportStats, Quest, QuestSummary, SearchResult,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared application state
@@ -82,13 +84,13 @@ fn import_browser_data(
     };
 
     let do_bookmarks = data_type == "bookmarks" || data_type == "all";
-    let do_history   = data_type == "history"   || data_type == "all";
+    let do_history = data_type == "history" || data_type == "all";
 
     if do_bookmarks {
         match import::import_bookmarks(&browser, &conn, &batch) {
             Ok(s) => {
-                combined.bookmarks_imported   += s.bookmarks_imported;
-                combined.duplicates_skipped   += s.duplicates_skipped;
+                combined.bookmarks_imported += s.bookmarks_imported;
+                combined.duplicates_skipped += s.duplicates_skipped;
                 combined.errors.extend(s.errors);
             }
             Err(e) => combined.errors.push(e),
@@ -98,8 +100,8 @@ fn import_browser_data(
     if do_history {
         match import::import_history(&browser, &conn, &batch, limit_days) {
             Ok(s) => {
-                combined.history_imported     += s.history_imported;
-                combined.duplicates_skipped   += s.duplicates_skipped;
+                combined.history_imported += s.history_imported;
+                combined.duplicates_skipped += s.duplicates_skipped;
                 combined.errors.extend(s.errors);
             }
             Err(e) => combined.errors.push(e),
@@ -126,14 +128,9 @@ fn get_context(
 
 /// Add or update a user note on an artifact.
 #[tauri::command]
-fn add_note(
-    state: State<AppDb>,
-    artifact_id: String,
-    note: String,
-) -> Result<(), String> {
+fn add_note(state: State<AppDb>, artifact_id: String, note: String) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    search::set_user_note(&conn, &artifact_id, &note)
-        .map_err(|e| e.to_string())
+    search::set_user_note(&conn, &artifact_id, &note).map_err(|e| e.to_string())
 }
 
 /// Get overall database statistics for the status bar.
@@ -154,10 +151,13 @@ fn generate_quests(state: State<AppDb>) -> Result<usize, String> {
 }
 
 #[tauri::command]
-fn list_quests(state: State<AppDb>, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<QuestSummary>, String> {
+fn list_quests(
+    state: State<AppDb>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<QuestSummary>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    quest::list_quests(&conn, limit.unwrap_or(20), offset.unwrap_or(0))
-        .map_err(|e| e.to_string())
+    quest::list_quests(&conn, limit.unwrap_or(20), offset.unwrap_or(0)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -185,7 +185,10 @@ fn archive_quest(state: State<AppDb>, quest_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_quest_for_artifact(state: State<AppDb>, artifact_id: String) -> Result<Vec<QuestSummary>, String> {
+fn get_quest_for_artifact(
+    state: State<AppDb>,
+    artifact_id: String,
+) -> Result<Vec<QuestSummary>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     quest::get_quest_for_artifact(&conn, &artifact_id).map_err(|e| e.to_string())
 }

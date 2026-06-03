@@ -1,5 +1,5 @@
-use rusqlite::{Connection, Result, params};
-use crate::models::{SearchResult, Artifact, DbStats};
+use crate::models::{Artifact, DbStats, SearchResult};
+use rusqlite::{params, Connection, Result};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Row → Artifact helper
@@ -7,22 +7,22 @@ use crate::models::{SearchResult, Artifact, DbStats};
 
 pub fn row_to_artifact(row: &rusqlite::Row) -> Result<Artifact> {
     Ok(Artifact {
-        id:           row.get(0)?,
-        r#type:       row.get(1)?,
-        title:        row.get(2)?,
-        url:          row.get(3)?,
-        domain:       row.get(4)?,
-        created_at:   row.get(5)?,
-        visited_at:   row.get(6)?,
+        id: row.get(0)?,
+        r#type: row.get(1)?,
+        title: row.get(2)?,
+        url: row.get(3)?,
+        domain: row.get(4)?,
+        created_at: row.get(5)?,
+        visited_at: row.get(6)?,
         is_bookmarked: {
             let v: i64 = row.get(7)?;
             v != 0
         },
-        visit_count:  row.get(8)?,
-        source:       row.get(9)?,
-        content:      row.get(10)?,
-        user_note:    row.get(11)?,
-        folder_path:  row.get(12)?,
+        visit_count: row.get(8)?,
+        source: row.get(9)?,
+        content: row.get(10)?,
+        user_note: row.get(11)?,
+        folder_path: row.get(12)?,
         import_batch: row.get(13)?,
     })
 }
@@ -55,10 +55,18 @@ pub fn search(
         extra.push_str(" AND a.visited_at >= ?3");
     }
     if date_to.is_some() {
-        extra.push_str(if date_from.is_some() { " AND a.visited_at <= ?4" } else { " AND a.visited_at <= ?3" });
+        extra.push_str(if date_from.is_some() {
+            " AND a.visited_at <= ?4"
+        } else {
+            " AND a.visited_at <= ?3"
+        });
     }
 
-    let source_clause = if source.is_some() { " AND a.source = ?5" } else { "" };
+    let source_clause = if source.is_some() {
+        " AND a.source = ?5"
+    } else {
+        ""
+    };
     let _ = filters; // used for clarity above
 
     let sql = format!(
@@ -82,13 +90,13 @@ pub fn search(
 
     let mut rows = match (date_from, date_to, source) {
         (Some(df), Some(dt), Some(s)) => stmt.query(params![query_escaped, "", df, dt, s])?,
-        (Some(df), Some(dt), None)    => stmt.query(params![query_escaped, "", df, dt])?,
-        (Some(df), None,     Some(s)) => stmt.query(params![query_escaped, "", df, s])?,
-        (None,     Some(dt), Some(s)) => stmt.query(params![query_escaped, "", dt, s])?,
-        (Some(df), None,     None)    => stmt.query(params![query_escaped, "", df])?,
-        (None,     Some(dt), None)    => stmt.query(params![query_escaped, "", dt])?,
-        (None,     None,     Some(s)) => stmt.query(params![query_escaped, "", s])?,
-        (None,     None,     None)    => stmt.query(params![query_escaped])?,
+        (Some(df), Some(dt), None) => stmt.query(params![query_escaped, "", df, dt])?,
+        (Some(df), None, Some(s)) => stmt.query(params![query_escaped, "", df, s])?,
+        (None, Some(dt), Some(s)) => stmt.query(params![query_escaped, "", dt, s])?,
+        (Some(df), None, None) => stmt.query(params![query_escaped, "", df])?,
+        (None, Some(dt), None) => stmt.query(params![query_escaped, "", dt])?,
+        (None, None, Some(s)) => stmt.query(params![query_escaped, "", s])?,
+        (None, None, None) => stmt.query(params![query_escaped])?,
     };
 
     let mut results = Vec::new();
@@ -96,7 +104,11 @@ pub fn search(
         let artifact = row_to_artifact(row)?;
         let score: f64 = row.get(14)?;
         let context = get_context(conn, &artifact.id, context_min)?;
-        results.push(SearchResult { artifact, score, context });
+        results.push(SearchResult {
+            artifact,
+            score,
+            context,
+        });
     }
 
     Ok(results)
@@ -109,7 +121,11 @@ fn escape_fts_query(input: &str) -> String {
         .split_whitespace()
         .map(|t| {
             let clean = t.replace('"', "");
-            if clean.is_empty() { String::new() } else { format!("\"{}\"", clean) }
+            if clean.is_empty() {
+                String::new()
+            } else {
+                format!("\"{}\"", clean)
+            }
         })
         .filter(|t| !t.is_empty())
         .collect();
@@ -136,11 +152,13 @@ pub fn get_context(
     window_minutes: i64,
 ) -> Result<Vec<Artifact>> {
     // First, get the visited_at of the target artifact
-    let visited_at: Option<String> = conn.query_row(
-        "SELECT visited_at FROM artifacts WHERE id = ?1",
-        params![artifact_id],
-        |row| row.get(0),
-    ).unwrap_or(None);
+    let visited_at: Option<String> = conn
+        .query_row(
+            "SELECT visited_at FROM artifacts WHERE id = ?1",
+            params![artifact_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
 
     let Some(ts) = visited_at else {
         return Ok(vec![]);
@@ -160,10 +178,9 @@ pub fn get_context(
            LIMIT 20"#,
     )?;
 
-    let artifact_iter = stmt.query_map(
-        params![artifact_id, ts, window_minutes],
-        |row| row_to_artifact(row),
-    )?;
+    let artifact_iter = stmt.query_map(params![artifact_id, ts, window_minutes], |row| {
+        row_to_artifact(row)
+    })?;
 
     let mut context = Vec::new();
     for a in artifact_iter {
@@ -177,26 +194,30 @@ pub fn get_context(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn get_stats(conn: &Connection) -> Result<DbStats> {
-    let total_artifacts: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM artifacts", [], |r| r.get(0)
-    )?;
+    let total_artifacts: i64 =
+        conn.query_row("SELECT COUNT(*) FROM artifacts", [], |r| r.get(0))?;
     let total_bookmarks: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM artifacts WHERE is_bookmarked = 1", [], |r| r.get(0)
+        "SELECT COUNT(*) FROM artifacts WHERE is_bookmarked = 1",
+        [],
+        |r| r.get(0),
     )?;
     let total_history: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM artifacts WHERE type = 'history'", [], |r| r.get(0)
+        "SELECT COUNT(*) FROM artifacts WHERE type = 'history'",
+        [],
+        |r| r.get(0),
     )?;
     let oldest_record: Option<String> = conn.query_row(
         "SELECT MIN(visited_at) FROM artifacts WHERE visited_at IS NOT NULL",
-        [], |r| r.get(0)
+        [],
+        |r| r.get(0),
     )?;
     let newest_record: Option<String> = conn.query_row(
         "SELECT MAX(visited_at) FROM artifacts WHERE visited_at IS NOT NULL",
-        [], |r| r.get(0)
+        [],
+        |r| r.get(0),
     )?;
-    let last_import: Option<String> = conn.query_row(
-        "SELECT MAX(created_at) FROM artifacts", [], |r| r.get(0)
-    )?;
+    let last_import: Option<String> =
+        conn.query_row("SELECT MAX(created_at) FROM artifacts", [], |r| r.get(0))?;
 
     Ok(DbStats {
         total_artifacts,
