@@ -1,8 +1,11 @@
 pub mod db;
+pub mod expander;
 pub mod import;
 pub mod models;
+pub mod normalizer;
 pub mod quest;
 pub mod search;
+pub mod segmenter;
 
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -33,6 +36,7 @@ pub struct AppDb(pub Mutex<Connection>);
 #[tauri::command]
 fn search_artifacts(
     state: State<AppDb>,
+    segmenter: State<segmenter::Segmenter>,
     query: String,
     date_from: Option<String>,
     date_to: Option<String>,
@@ -45,6 +49,7 @@ fn search_artifacts(
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     search::search(
         &conn,
+        &segmenter,
         &query,
         date_from.as_deref(),
         date_to.as_deref(),
@@ -140,6 +145,13 @@ fn get_stats(state: State<AppDb>) -> Result<DbStats, String> {
     search::get_stats(&conn).map_err(|e| e.to_string())
 }
 
+/// Recompute Phase 3 normalization metadata for all artifacts.
+#[tauri::command]
+fn normalize_artifacts(state: State<AppDb>) -> Result<normalizer::NormalizeStats, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    normalizer::normalize_all(&conn).map_err(|e| e.to_string())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 2: Quest commands
 // ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +232,7 @@ pub fn run() {
             });
 
             app.manage(AppDb(Mutex::new(conn)));
+            app.manage(segmenter::Segmenter::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -229,6 +242,7 @@ pub fn run() {
             get_context,
             add_note,
             get_stats,
+            normalize_artifacts,
             generate_quests,
             list_quests,
             get_quest,

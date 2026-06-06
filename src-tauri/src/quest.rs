@@ -32,7 +32,8 @@ pub fn generate_quests(conn: &Connection) -> Result<usize> {
     let mut stmt = conn.prepare(
         r#"SELECT id, type, title, url, domain, created_at, visited_at,
                   is_bookmarked, visit_count, source, content, user_note,
-                  folder_path, import_batch
+                  folder_path, import_batch, page_category, noise_score,
+                  extracted_query, canonical_url, referrer_domain
            FROM artifacts
            WHERE visited_at IS NOT NULL
            ORDER BY visited_at ASC"#,
@@ -331,7 +332,8 @@ pub fn get_quest(conn: &Connection, quest_id: &str) -> Result<Quest> {
     let mut stmt = conn.prepare(
         r#"SELECT a.id, a.type, a.title, a.url, a.domain, a.created_at, a.visited_at,
                   a.is_bookmarked, a.visit_count, a.source, a.content, a.user_note,
-                  a.folder_path, a.import_batch
+                  a.folder_path, a.import_batch, a.page_category, a.noise_score,
+                  a.extracted_query, a.canonical_url, a.referrer_domain
            FROM artifacts a
            JOIN quest_artifacts qa ON a.id = qa.artifact_id
            WHERE qa.quest_id = ?1

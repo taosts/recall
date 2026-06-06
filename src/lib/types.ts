@@ -2,6 +2,7 @@
 
 export type ArtifactType = 'bookmark' | 'history' | 'download' | 'note';
 export type SourceType = 'edge' | 'chrome' | 'manual';
+export type PageCategory = 'search_query' | 'content' | 'redirect' | 'login' | 'utility';
 
 export interface Artifact {
   id: string;
@@ -18,6 +19,11 @@ export interface Artifact {
   user_note: string | null;
   folder_path: string | null;
   import_batch: string | null;
+  page_category: PageCategory | null;
+  noise_score: number;
+  extracted_query: string | null;
+  canonical_url: string | null;
+  referrer_domain: string | null;
 }
 
 export interface SearchResult {
@@ -51,6 +57,16 @@ export interface DbStats {
   oldest_record: string | null;
   newest_record: string | null;
   last_import: string | null;
+}
+
+export interface NormalizeStats {
+  total_scanned: number;
+  updated: number;
+  search_queries: number;
+  redirects: number;
+  login_pages: number;
+  utility_pages: number;
+  high_noise: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -93,4 +109,3 @@ export interface SearchFilters {
   source?: SourceType;
   contextMin: ContextWindow;
 }
-

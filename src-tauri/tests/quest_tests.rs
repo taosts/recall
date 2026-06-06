@@ -12,6 +12,7 @@ mod tests {
 
     use recall_app_lib::quest;
     use recall_app_lib::search;
+    use recall_app_lib::segmenter::Segmenter;
 
     use rusqlite::Connection;
 
@@ -39,34 +40,39 @@ mod tests {
                 content       TEXT,
                 user_note     TEXT,
                 folder_path   TEXT,
-                import_batch  TEXT
+                import_batch  TEXT,
+                page_category TEXT DEFAULT 'content',
+                noise_score REAL NOT NULL DEFAULT 0.0,
+                extracted_query TEXT,
+                canonical_url TEXT,
+                referrer_domain TEXT
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
-                title, url, domain, content, user_note, folder_path,
+                title, url, domain, content, user_note, folder_path, extracted_query,
                 content='artifacts', content_rowid='rowid',
                 tokenize='unicode61'
             );
 
             CREATE TRIGGER IF NOT EXISTS artifacts_ai AFTER INSERT ON artifacts BEGIN
-                INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path)
+                INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path, extracted_query)
                 VALUES (new.rowid, new.title, new.url, new.domain,
-                        new.content, new.user_note, new.folder_path);
+                        new.content, new.user_note, new.folder_path, new.extracted_query);
             END;
 
             CREATE TRIGGER IF NOT EXISTS artifacts_ad AFTER DELETE ON artifacts BEGIN
-                INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path)
+                INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path, extracted_query)
                 VALUES ('delete', old.rowid, old.title, old.url, old.domain,
-                        old.content, old.user_note, old.folder_path);
+                        old.content, old.user_note, old.folder_path, old.extracted_query);
             END;
 
             CREATE TRIGGER IF NOT EXISTS artifacts_au AFTER UPDATE ON artifacts BEGIN
-                INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path)
+                INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path, extracted_query)
                 VALUES ('delete', old.rowid, old.title, old.url, old.domain,
-                        old.content, old.user_note, old.folder_path);
-                INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path)
+                        old.content, old.user_note, old.folder_path, old.extracted_query);
+                INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path, extracted_query)
                 VALUES (new.rowid, new.title, new.url, new.domain,
-                        new.content, new.user_note, new.folder_path);
+                        new.content, new.user_note, new.folder_path, new.extracted_query);
             END;
 
             CREATE INDEX IF NOT EXISTS idx_artifacts_visited_at ON artifacts(visited_at);
@@ -527,7 +533,9 @@ mod tests {
             false,
         );
 
-        let results = search::search(&conn, "OpenWrt DNS", None, None, None, 30).unwrap();
+        let segmenter = Segmenter::new();
+        let results =
+            search::search(&conn, &segmenter, "OpenWrt DNS", None, None, None, 30).unwrap();
         assert!(
             !results.is_empty(),
             "FTS search for 'OpenWrt DNS' should find the matching artifact"
@@ -549,7 +557,8 @@ mod tests {
         );
         // The empty-query guard is in lib.rs (Tauri command layer), not search::search().
         // Direct FTS5 call with empty/whitespace input should return an error.
-        let result = search::search(&conn, "   ", None, None, None, 30);
+        let segmenter = Segmenter::new();
+        let result = search::search(&conn, &segmenter, "   ", None, None, None, 30);
         assert!(
             result.is_err(),
             "Raw FTS5 search with empty query should error (guard is in lib.rs)"
@@ -617,7 +626,8 @@ mod tests {
         search::set_user_note(&conn, "note1", "This was useful for debugging").unwrap();
 
         // Search and verify note is returned
-        let results = search::search(&conn, "page", None, None, None, 30).unwrap();
+        let segmenter = Segmenter::new();
+        let results = search::search(&conn, &segmenter, "page", None, None, None, 30).unwrap();
         assert!(!results.is_empty());
         assert_eq!(
             results[0].artifact.user_note,
@@ -674,7 +684,8 @@ mod tests {
         );
 
         // Step 2: Search works
-        let results = search::search(&conn, "reddit", None, None, None, 30).unwrap();
+        let segmenter = Segmenter::new();
+        let results = search::search(&conn, &segmenter, "reddit", None, None, None, 30).unwrap();
         assert!(!results.is_empty(), "Should find reddit pages");
 
         // Step 3: Generate Quests

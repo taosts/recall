@@ -26,6 +26,16 @@ pub struct Artifact {
     pub folder_path: Option<String>,
     /// Import batch identifier
     pub import_batch: Option<String>,
+    /// "search_query" | "content" | "redirect" | "login" | "utility"
+    pub page_category: Option<String>,
+    /// 0.0 = useful content, 1.0 = pure noise
+    pub noise_score: f64,
+    /// Search engine query extracted from the URL, if any
+    pub extracted_query: Option<String>,
+    /// URL normalized by removing tracking parameters
+    pub canonical_url: Option<String>,
+    /// Inferred referrer/source domain for future context work
+    pub referrer_domain: Option<String>,
 }
 
 /// A search result enriched with BM25 relevance score and temporal context.
@@ -36,6 +46,9 @@ pub struct SearchResult {
     pub score: f64,
     /// Artifacts accessed within the context time window of this result
     pub context: Vec<Artifact>,
+    /// Phase 2: Quest associations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quests: Option<Vec<QuestSummary>>,
 }
 
 /// Statistics returned after a browser import operation.
@@ -131,6 +144,11 @@ mod tests {
             user_note: Some("Must read".into()),
             folder_path: Some("Bookmarks Bar/Dev/Rust".into()),
             import_batch: Some("batch-abc".into()),
+            page_category: Some("content".into()),
+            noise_score: 0.0,
+            extracted_query: None,
+            canonical_url: Some("https://doc.rust-lang.org/book/".into()),
+            referrer_domain: None,
         }
     }
 
@@ -173,6 +191,11 @@ mod tests {
             user_note: None,
             folder_path: None,
             import_batch: None,
+            page_category: None,
+            noise_score: 0.0,
+            extracted_query: None,
+            canonical_url: None,
+            referrer_domain: None,
         };
 
         let json = serde_json::to_string(&artifact).expect("serialize");
@@ -188,6 +211,10 @@ mod tests {
             "user_note",
             "folder_path",
             "import_batch",
+            "page_category",
+            "extracted_query",
+            "canonical_url",
+            "referrer_domain",
         ] {
             assert!(
                 v[field].is_null(),
@@ -250,6 +277,7 @@ mod tests {
             artifact: sample_artifact(),
             score: -3.14,
             context: vec![sample_artifact()],
+            quests: None,
         };
 
         let json = serde_json::to_string(&result).expect("serialize");

@@ -5,6 +5,7 @@ import type {
   BrowserInfo,
   Artifact,
   DbStats,
+  NormalizeStats,
   SourceType,
   ContextWindow,
   Quest,
@@ -67,6 +68,11 @@ export async function addNote(artifactId: string, note: string): Promise<void> {
 /** Fetch database statistics. */
 export async function getStats(): Promise<DbStats> {
   return invoke<DbStats>('get_stats');
+}
+
+/** Recompute Phase 3 normalization metadata for all artifacts. */
+export async function normalizeArtifacts(): Promise<NormalizeStats> {
+  return invoke<NormalizeStats>('normalize_artifacts');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

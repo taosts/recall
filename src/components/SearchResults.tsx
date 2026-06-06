@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { SearchResult, ContextWindow } from '../lib/types';
 import { addNote } from '../lib/commands';
 import { ContextPanel } from './ContextPanel';
+import { QuestBadge } from './QuestBadge';
 
 interface Props {
   results: SearchResult[];
@@ -150,6 +151,23 @@ function ResultCard({ result, contextMin, style }: CardProps) {
               style={{ fontSize: '11px', padding: '2px 8px', cursor: 'default' }}>
               ★
             </span>
+          )}
+          {artifact.extracted_query && (
+            <span className="chip"
+              style={{ fontSize: '11px', padding: '2px 8px', cursor: 'default' }}
+              title="Search query extracted from browser history">
+              Query: {artifact.extracted_query}
+            </span>
+          )}
+          {artifact.noise_score >= 0.6 && (
+            <span className="chip"
+              style={{ fontSize: '11px', padding: '2px 8px', cursor: 'default', color: 'var(--text-muted)' }}
+              title={`Noise score ${artifact.noise_score.toFixed(2)}`}>
+              noisy
+            </span>
+          )}
+          {result.quests && result.quests.length > 0 && (
+            <QuestBadge quests={result.quests} />
           )}
         </div>
       </div>

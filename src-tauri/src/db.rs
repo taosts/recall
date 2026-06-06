@@ -7,87 +7,58 @@ use std::path::Path;
 pub fn init_db(db_path: &Path) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
 
-    // Enable WAL mode for better concurrent read performance
+    // Enable WAL mode for better concurrent read performance.
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
-    conn.execute_batch(r#"
-        -- ─────────────────────────────────────────────────────────────────
-        -- Core table: information traces
-        -- ─────────────────────────────────────────────────────────────────
+    conn.execute_batch(
+        r#"
         CREATE TABLE IF NOT EXISTS artifacts (
-            id            TEXT PRIMARY KEY,
-            type          TEXT NOT NULL DEFAULT 'history',
-            title         TEXT,
-            url           TEXT,
-            domain        TEXT,
-            created_at    TEXT NOT NULL,
-            visited_at    TEXT,
-            is_bookmarked INTEGER NOT NULL DEFAULT 0,
-            visit_count   INTEGER NOT NULL DEFAULT 0,
-            source        TEXT,
-            content       TEXT,
-            user_note     TEXT,
-            folder_path   TEXT,
-            import_batch  TEXT
+            id              TEXT PRIMARY KEY,
+            type            TEXT NOT NULL DEFAULT 'history',
+            title           TEXT,
+            url             TEXT,
+            domain          TEXT,
+            created_at      TEXT NOT NULL,
+            visited_at      TEXT,
+            is_bookmarked   INTEGER NOT NULL DEFAULT 0,
+            visit_count     INTEGER NOT NULL DEFAULT 0,
+            source          TEXT,
+            content         TEXT,
+            user_note       TEXT,
+            folder_path     TEXT,
+            import_batch    TEXT,
+            page_category   TEXT DEFAULT 'content',
+            noise_score     REAL NOT NULL DEFAULT 0.0,
+            extracted_query TEXT,
+            canonical_url   TEXT,
+            referrer_domain TEXT
         );
+    "#,
+    )?;
 
-        -- ─────────────────────────────────────────────────────────────────
-        -- FTS5 full-text index
-        -- tokenize='unicode61' handles Unicode text; good enough for MVP.
-        -- Future: replace with trigram or a custom tokenizer for CJK.
-        -- ─────────────────────────────────────────────────────────────────
-        CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
-            title,
-            url,
-            domain,
-            content,
-            user_note,
-            folder_path,
-            content='artifacts',
-            content_rowid='rowid',
-            tokenize='unicode61'
-        );
+    ensure_artifact_phase3_columns(&conn)?;
+    ensure_fts_schema(&conn)?;
 
-        -- ─────────────────────────────────────────────────────────────────
-        -- Triggers to keep FTS index in sync with the main table
-        -- ─────────────────────────────────────────────────────────────────
-        CREATE TRIGGER IF NOT EXISTS artifacts_ai
-        AFTER INSERT ON artifacts BEGIN
-            INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path)
-            VALUES (new.rowid, new.title, new.url, new.domain,
-                    new.content, new.user_note, new.folder_path);
-        END;
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_artifacts_visited_at
+            ON artifacts(visited_at);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_domain
+            ON artifacts(domain);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_type
+            ON artifacts(type);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_source
+            ON artifacts(source);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_url
+            ON artifacts(url);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_canonical_url
+            ON artifacts(canonical_url);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_page_category
+            ON artifacts(page_category);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_noise_score
+            ON artifacts(noise_score);
 
-        CREATE TRIGGER IF NOT EXISTS artifacts_ad
-        AFTER DELETE ON artifacts BEGIN
-            INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path)
-            VALUES ('delete', old.rowid, old.title, old.url, old.domain,
-                    old.content, old.user_note, old.folder_path);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS artifacts_au
-        AFTER UPDATE ON artifacts BEGIN
-            INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path)
-            VALUES ('delete', old.rowid, old.title, old.url, old.domain,
-                    old.content, old.user_note, old.folder_path);
-            INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path)
-            VALUES (new.rowid, new.title, new.url, new.domain,
-                    new.content, new.user_note, new.folder_path);
-        END;
-
-        -- ─────────────────────────────────────────────────────────────────
-        -- Indexes for time-range and filter queries
-        -- ─────────────────────────────────────────────────────────────────
-        CREATE INDEX IF NOT EXISTS idx_artifacts_visited_at ON artifacts(visited_at);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_domain     ON artifacts(domain);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_type       ON artifacts(type);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_source     ON artifacts(source);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_url        ON artifacts(url);
-
-        -- ─────────────────────────────────────────────────────────────────
-        -- Phase 2: Quest (探索任务) tables
-        -- ─────────────────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS quests (
             id          TEXT PRIMARY KEY,
             name        TEXT,
@@ -113,20 +84,133 @@ pub fn init_db(db_path: &Path) -> Result<Connection> {
             ON quests(started_at);
         CREATE INDEX IF NOT EXISTS idx_quests_status
             ON quests(status);
-    "#)?;
+
+        CREATE TABLE IF NOT EXISTS concept_synonyms (
+            term       TEXT NOT NULL,
+            synonym    TEXT NOT NULL,
+            weight     REAL NOT NULL DEFAULT 1.0,
+            source     TEXT NOT NULL DEFAULT 'manual',
+            PRIMARY KEY (term, synonym)
+        );
+
+        CREATE TABLE IF NOT EXISTS search_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            query      TEXT NOT NULL,
+            result_ids TEXT,
+            created_at TEXT NOT NULL
+        );
+    "#,
+    )?;
 
     Ok(conn)
 }
 
-/// Upsert a single artifact URL — update visit_count / visited_at if URL already exists.
-/// Returns true if inserted, false if updated.
+fn ensure_artifact_phase3_columns(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "artifacts", "page_category", "TEXT DEFAULT 'content'")?;
+    ensure_column(
+        conn,
+        "artifacts",
+        "noise_score",
+        "REAL NOT NULL DEFAULT 0.0",
+    )?;
+    ensure_column(conn, "artifacts", "extracted_query", "TEXT")?;
+    ensure_column(conn, "artifacts", "canonical_url", "TEXT")?;
+    ensure_column(conn, "artifacts", "referrer_domain", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_fts_schema(conn: &Connection) -> Result<()> {
+    let fts_ready = table_has_column(conn, "artifacts_fts", "extracted_query")?;
+
+    conn.execute_batch(
+        r#"
+        DROP TRIGGER IF EXISTS artifacts_ai;
+        DROP TRIGGER IF EXISTS artifacts_ad;
+        DROP TRIGGER IF EXISTS artifacts_au;
+    "#,
+    )?;
+
+    if !fts_ready {
+        conn.execute_batch("DROP TABLE IF EXISTS artifacts_fts;")?;
+    }
+
+    conn.execute_batch(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
+            title,
+            url,
+            domain,
+            content,
+            user_note,
+            folder_path,
+            extracted_query,
+            content='artifacts',
+            content_rowid='rowid',
+            tokenize='unicode61'
+        );
+
+        CREATE TRIGGER artifacts_ai
+        AFTER INSERT ON artifacts BEGIN
+            INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path, extracted_query)
+            VALUES (new.rowid, new.title, new.url, new.domain,
+                    new.content, new.user_note, new.folder_path, new.extracted_query);
+        END;
+
+        CREATE TRIGGER artifacts_ad
+        AFTER DELETE ON artifacts BEGIN
+            INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path, extracted_query)
+            VALUES ('delete', old.rowid, old.title, old.url, old.domain,
+                    old.content, old.user_note, old.folder_path, old.extracted_query);
+        END;
+
+        CREATE TRIGGER artifacts_au
+        AFTER UPDATE ON artifacts BEGIN
+            INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path, extracted_query)
+            VALUES ('delete', old.rowid, old.title, old.url, old.domain,
+                    old.content, old.user_note, old.folder_path, old.extracted_query);
+            INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path, extracted_query)
+            VALUES (new.rowid, new.title, new.url, new.domain,
+                    new.content, new.user_note, new.folder_path, new.extracted_query);
+        END;
+
+        INSERT INTO artifacts_fts(artifacts_fts) VALUES('rebuild');
+    "#,
+    )?;
+
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    if !table_has_column(conn, table, column)? {
+        conn.execute(
+            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, definition),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Upsert a single artifact URL. Returns true if inserted, false if updated.
 pub fn upsert_artifact(conn: &Connection, a: &crate::models::Artifact) -> Result<bool> {
     let inserted = conn.execute(
         r#"INSERT INTO artifacts
                (id, type, title, url, domain, created_at, visited_at,
                 is_bookmarked, visit_count, source, content, user_note,
-                folder_path, import_batch)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                folder_path, import_batch, page_category, noise_score,
+                extracted_query, canonical_url, referrer_domain)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
            ON CONFLICT(id) DO UPDATE SET
                visit_count   = visit_count + excluded.visit_count,
                visited_at    = CASE
@@ -136,7 +220,12 @@ pub fn upsert_artifact(conn: &Connection, a: &crate::models::Artifact) -> Result
                                END,
                is_bookmarked = MAX(is_bookmarked, excluded.is_bookmarked),
                title         = COALESCE(excluded.title, title),
-               user_note     = COALESCE(user_note, excluded.user_note)"#,
+               user_note     = COALESCE(user_note, excluded.user_note),
+               page_category = COALESCE(excluded.page_category, page_category),
+               noise_score   = excluded.noise_score,
+               extracted_query = COALESCE(excluded.extracted_query, extracted_query),
+               canonical_url = COALESCE(excluded.canonical_url, canonical_url),
+               referrer_domain = COALESCE(excluded.referrer_domain, referrer_domain)"#,
         params![
             a.id,
             a.r#type,
@@ -152,6 +241,11 @@ pub fn upsert_artifact(conn: &Connection, a: &crate::models::Artifact) -> Result
             a.user_note,
             a.folder_path,
             a.import_batch,
+            a.page_category,
+            a.noise_score,
+            a.extracted_query,
+            a.canonical_url,
+            a.referrer_domain,
         ],
     )?;
     Ok(inserted == 1)

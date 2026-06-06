@@ -23,3 +23,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local project handover/context docs
+HANDOVER.md
+FUNCTION_INDEX.md
+回忆系统讨论.txt
+implementation_plan.md

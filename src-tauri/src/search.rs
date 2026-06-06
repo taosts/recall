@@ -1,5 +1,9 @@
+use crate::expander::{build_fts_query_from_terms, QueryExpander};
 use crate::models::{Artifact, DbStats, SearchResult};
+use crate::segmenter::Segmenter;
+use rusqlite::types::ToSql;
 use rusqlite::{params, Connection, Result};
+use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Row → Artifact helper
@@ -24,117 +28,148 @@ pub fn row_to_artifact(row: &rusqlite::Row) -> Result<Artifact> {
         user_note: row.get(11)?,
         folder_path: row.get(12)?,
         import_batch: row.get(13)?,
+        page_category: row.get(14)?,
+        noise_score: row.get(15)?,
+        extracted_query: row.get(16)?,
+        canonical_url: row.get(17)?,
+        referrer_domain: row.get(18)?,
     })
 }
 
+#[derive(Clone)]
+struct RankedArtifact {
+    artifact: Artifact,
+    score: f64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Full-text search via FTS5 + BM25 ranking
+// Full-text search via BM25 + query expansion + RRF
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Search artifacts using FTS5 MATCH with optional time and source filters.
+/// Search artifacts using two BM25 layers:
+/// 1. literal query terms segmented for search
+/// 2. expanded terms from synonyms, local co-occurrence, and PRF
 ///
-/// `query`       — user's raw search text (passed straight to FTS5 MATCH)
-/// `date_from`   — optional ISO 8601 lower bound for visited_at
-/// `date_to`     — optional ISO 8601 upper bound for visited_at
-/// `source`      — optional source filter ("edge" | "chrome" | null = all)
-/// `context_min` — minutes for the context window (default 30)
-///
-/// Returns ranked SearchResult list, each enriched with temporal context.
+/// The layers are merged with Reciprocal Rank Fusion, then high-noise pages
+/// are downweighted using Phase 3A's noise_score.
 pub fn search(
     conn: &Connection,
+    segmenter: &Segmenter,
     query: &str,
     date_from: Option<&str>,
     date_to: Option<&str>,
     source: Option<&str>,
     context_min: i64,
 ) -> Result<Vec<SearchResult>> {
-    // Build dynamic WHERE clauses
-    let filters = vec!["fts.rowid = a.rowid"];
-    let mut extra = String::new();
-    if date_from.is_some() {
-        extra.push_str(" AND a.visited_at >= ?3");
-    }
-    if date_to.is_some() {
-        extra.push_str(if date_from.is_some() {
-            " AND a.visited_at <= ?4"
-        } else {
-            " AND a.visited_at <= ?3"
-        });
-    }
+    let literal_terms = segmenter.cut_for_search(query);
+    let literal_fts_query = build_fts_query_from_terms(&literal_terms);
+    let layer1 = search_bm25(conn, &literal_fts_query, date_from, date_to, source, 50)?;
 
-    let source_clause = if source.is_some() {
-        " AND a.source = ?5"
+    let expanded = QueryExpander::new().expand(conn, segmenter, query);
+    let layer2 = if expanded.fts_query.is_empty() || expanded.fts_query == literal_fts_query {
+        Vec::new()
     } else {
-        ""
-    };
-    let _ = filters; // used for clarity above
-
-    let sql = format!(
-        r#"SELECT a.id, a.type, a.title, a.url, a.domain, a.created_at,
-                  a.visited_at, a.is_bookmarked, a.visit_count, a.source,
-                  a.content, a.user_note, a.folder_path, a.import_batch,
-                  bm25(artifacts_fts) AS score
-           FROM artifacts_fts fts
-           JOIN artifacts a ON fts.rowid = a.rowid
-           WHERE artifacts_fts MATCH ?1
-           {}{}
-           ORDER BY score
-           LIMIT 50"#,
-        extra, source_clause
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-
-    // Bind parameters in order
-    let query_escaped = escape_fts_query(query);
-
-    let mut rows = match (date_from, date_to, source) {
-        (Some(df), Some(dt), Some(s)) => stmt.query(params![query_escaped, "", df, dt, s])?,
-        (Some(df), Some(dt), None) => stmt.query(params![query_escaped, "", df, dt])?,
-        (Some(df), None, Some(s)) => stmt.query(params![query_escaped, "", df, s])?,
-        (None, Some(dt), Some(s)) => stmt.query(params![query_escaped, "", dt, s])?,
-        (Some(df), None, None) => stmt.query(params![query_escaped, "", df])?,
-        (None, Some(dt), None) => stmt.query(params![query_escaped, "", dt])?,
-        (None, None, Some(s)) => stmt.query(params![query_escaped, "", s])?,
-        (None, None, None) => stmt.query(params![query_escaped])?,
+        search_bm25(conn, &expanded.fts_query, date_from, date_to, source, 50)?
     };
 
+    let ranked = reciprocal_rank_fusion(vec![layer1, layer2], 60);
     let mut results = Vec::new();
-    while let Some(row) = rows.next()? {
-        let artifact = row_to_artifact(row)?;
-        let score: f64 = row.get(14)?;
-        let context = get_context(conn, &artifact.id, context_min)?;
+
+    for ranked in ranked.into_iter().take(50) {
+        let context = get_context(conn, &ranked.artifact.id, context_min)?;
+        let quests = crate::quest::get_quest_for_artifact(conn, &ranked.artifact.id)
+            .ok()
+            .filter(|q| !q.is_empty());
+
         results.push(SearchResult {
-            artifact,
-            score,
+            artifact: ranked.artifact,
+            score: ranked.score,
             context,
+            quests,
         });
     }
 
     Ok(results)
 }
 
-/// Escape special FTS5 characters in user input to prevent query syntax errors.
-fn escape_fts_query(input: &str) -> String {
-    // Wrap each whitespace-separated token in double quotes for exact matching
-    let tokens: Vec<String> = input
-        .split_whitespace()
-        .map(|t| {
-            let clean = t.replace('"', "");
-            if clean.is_empty() {
-                String::new()
-            } else {
-                format!("\"{}\"", clean)
-            }
-        })
-        .filter(|t| !t.is_empty())
-        .collect();
+fn search_bm25(
+    conn: &Connection,
+    fts_query: &str,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+    source: Option<&str>,
+    limit: i64,
+) -> Result<Vec<RankedArtifact>> {
+    let mut sql = String::from(
+        r#"SELECT a.id, a.type, a.title, a.url, a.domain, a.created_at,
+                  a.visited_at, a.is_bookmarked, a.visit_count, a.source,
+                  a.content, a.user_note, a.folder_path, a.import_batch,
+                  a.page_category, a.noise_score, a.extracted_query,
+                  a.canonical_url, a.referrer_domain,
+                  bm25(artifacts_fts) AS score
+           FROM artifacts_fts fts
+           JOIN artifacts a ON fts.rowid = a.rowid
+           WHERE artifacts_fts MATCH ?"#,
+    );
 
-    if tokens.is_empty() {
-        String::new()
-    } else {
-        tokens.join(" OR ")
+    let mut owned_params: Vec<Box<dyn ToSql>> = vec![Box::new(fts_query.to_string())];
+
+    if let Some(df) = date_from {
+        sql.push_str(" AND a.visited_at >= ?");
+        owned_params.push(Box::new(df.to_string()));
     }
+    if let Some(dt) = date_to {
+        sql.push_str(" AND a.visited_at <= ?");
+        owned_params.push(Box::new(dt.to_string()));
+    }
+    if let Some(s) = source {
+        sql.push_str(" AND a.source = ?");
+        owned_params.push(Box::new(s.to_string()));
+    }
+    sql.push_str(" ORDER BY score LIMIT ?");
+    owned_params.push(Box::new(limit));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn ToSql> = owned_params.iter().map(|p| p.as_ref()).collect();
+    let mut rows = stmt.query(param_refs.as_slice())?;
+
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        let artifact = row_to_artifact(row)?;
+        let score: f64 = row.get(19)?;
+        results.push(RankedArtifact { artifact, score });
+    }
+
+    Ok(results)
+}
+
+fn reciprocal_rank_fusion(ranked_lists: Vec<Vec<RankedArtifact>>, k: i64) -> Vec<RankedArtifact> {
+    let mut scores: HashMap<String, (Artifact, f64)> = HashMap::new();
+
+    for list in ranked_lists {
+        for (idx, ranked) in list.into_iter().enumerate() {
+            let rank = idx as f64 + 1.0;
+            let rrf = 1.0 / (k as f64 + rank);
+            let noise_multiplier = 1.0 - ranked.artifact.noise_score.clamp(0.0, 1.0) * 0.5;
+            let adjusted = rrf * noise_multiplier;
+
+            scores
+                .entry(ranked.artifact.id.clone())
+                .and_modify(|(_, score)| *score += adjusted)
+                .or_insert((ranked.artifact, adjusted));
+        }
+    }
+
+    let mut merged: Vec<RankedArtifact> = scores
+        .into_iter()
+        .map(|(_, (artifact, score))| RankedArtifact { artifact, score })
+        .collect();
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -143,15 +178,11 @@ fn escape_fts_query(input: &str) -> String {
 
 /// Retrieve artifacts accessed within ±window_minutes of the given artifact's
 /// visited_at timestamp. This is the core memory-trigger feature.
-///
-/// The window is user-configurable (15 / 30 / 60 / 120 min).
-/// Future: auto-adapt window size based on Quest type.
 pub fn get_context(
     conn: &Connection,
     artifact_id: &str,
     window_minutes: i64,
 ) -> Result<Vec<Artifact>> {
-    // First, get the visited_at of the target artifact
     let visited_at: Option<String> = conn
         .query_row(
             "SELECT visited_at FROM artifacts WHERE id = ?1",
@@ -167,7 +198,8 @@ pub fn get_context(
     let mut stmt = conn.prepare(
         r#"SELECT id, type, title, url, domain, created_at, visited_at,
                   is_bookmarked, visit_count, source, content, user_note,
-                  folder_path, import_batch
+                  folder_path, import_batch, page_category, noise_score,
+                  extracted_query, canonical_url, referrer_domain
            FROM artifacts
            WHERE id != ?1
              AND visited_at IS NOT NULL
@@ -238,66 +270,64 @@ pub fn set_user_note(conn: &Connection, artifact_id: &str, note: &str) -> Result
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Unit tests
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // 1. Single token → wrapped in double quotes, no OR
-    #[test]
-    fn test_escape_single_word() {
-        assert_eq!(escape_fts_query("hello"), r#""hello""#);
+    fn test_artifact(id: &str, noise_score: f64) -> Artifact {
+        Artifact {
+            id: id.to_string(),
+            r#type: "history".to_string(),
+            title: Some(id.to_string()),
+            url: Some(format!("https://example.com/{}", id)),
+            domain: Some("example.com".to_string()),
+            created_at: "2026-01-01T00:00:00".to_string(),
+            visited_at: Some("2026-01-01T00:00:00".to_string()),
+            is_bookmarked: false,
+            visit_count: 1,
+            source: Some("edge".to_string()),
+            content: None,
+            user_note: None,
+            folder_path: None,
+            import_batch: None,
+            page_category: Some("content".to_string()),
+            noise_score,
+            extracted_query: None,
+            canonical_url: None,
+            referrer_domain: None,
+        }
     }
 
-    // 2. Two tokens → each quoted, joined with OR
     #[test]
-    fn test_escape_multi_words() {
-        assert_eq!(escape_fts_query("ZFS cache"), r#""ZFS" OR "cache""#);
+    fn test_rrf_merges_duplicate_results() {
+        let a = RankedArtifact {
+            artifact: test_artifact("a", 0.0),
+            score: -1.0,
+        };
+        let b = RankedArtifact {
+            artifact: test_artifact("b", 0.0),
+            score: -2.0,
+        };
+
+        let merged = reciprocal_rank_fusion(vec![vec![a.clone(), b], vec![a]], 60);
+
+        assert_eq!(merged[0].artifact.id, "a");
+        assert_eq!(merged.len(), 2);
     }
 
-    // 3. Embedded double quotes are stripped before wrapping
     #[test]
-    fn test_escape_strips_quotes() {
-        assert_eq!(escape_fts_query(r#"he"llo"#), r#""hello""#);
-    }
+    fn test_rrf_downweights_noise() {
+        let noisy = RankedArtifact {
+            artifact: test_artifact("noisy", 1.0),
+            score: -1.0,
+        };
+        let clean = RankedArtifact {
+            artifact: test_artifact("clean", 0.0),
+            score: -1.0,
+        };
 
-    // 4. Empty string → empty output (no tokens)
-    #[test]
-    fn test_escape_empty_string() {
-        assert_eq!(escape_fts_query(""), "");
-    }
+        let merged = reciprocal_rank_fusion(vec![vec![noisy, clean]], 60);
 
-    // 5. Whitespace-only input → empty output (split_whitespace yields nothing)
-    #[test]
-    fn test_escape_only_whitespace() {
-        assert_eq!(escape_fts_query("   "), "");
-    }
-
-    // 6. Tabs and multiple spaces are treated as whitespace delimiters
-    #[test]
-    fn test_escape_mixed_spaces_tabs() {
-        assert_eq!(
-            escape_fts_query("alpha\t\tbeta   gamma"),
-            r#""alpha" OR "beta" OR "gamma""#,
-        );
-    }
-
-    // 7. CJK / non-ASCII tokens are handled correctly
-    #[test]
-    fn test_escape_chinese_characters() {
-        assert_eq!(escape_fts_query("ZFS 缓存"), r#""ZFS" OR "缓存""#);
-    }
-
-    // 8. Characters that would break bare FTS5 syntax (parens, colons, etc.)
-    //    are safely wrapped inside double quotes so FTS5 treats them as literals.
-    #[test]
-    fn test_escape_special_fts_chars() {
-        assert_eq!(
-            escape_fts_query("foo:bar (baz) qux*"),
-            r#""foo:bar" OR "(baz)" OR "qux*""#,
-        );
+        assert_eq!(merged[0].artifact.id, "clean");
     }
 }
