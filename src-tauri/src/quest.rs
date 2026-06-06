@@ -4,6 +4,7 @@
 
 use crate::models::{Artifact, Quest, QuestSummary};
 use crate::search::row_to_artifact;
+use crate::segmenter::{jaccard_similarity, Segmenter};
 use rusqlite::{params, Connection, Result};
 use uuid::Uuid;
 
@@ -24,7 +25,7 @@ const MAX_QUEST_DURATION_HOURS: i64 = 8;
 // 1. generate_quests — Main clustering algorithm
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn generate_quests(conn: &Connection) -> Result<usize> {
+pub fn generate_quests(conn: &Connection, segmenter: &Segmenter) -> Result<usize> {
     // Option A: Delete all auto-generated Quests and regenerate
     conn.execute("DELETE FROM quests WHERE status = 'auto'", [])?;
 
@@ -36,6 +37,8 @@ pub fn generate_quests(conn: &Connection) -> Result<usize> {
                   extracted_query, canonical_url, referrer_domain
            FROM artifacts
            WHERE visited_at IS NOT NULL
+             AND COALESCE(noise_score, 0.0) <= 0.7
+             AND COALESCE(page_category, 'content') != 'utility'
            ORDER BY visited_at ASC"#,
     )?;
 
@@ -75,7 +78,9 @@ pub fn generate_quests(conn: &Connection) -> Result<usize> {
 
         let force_split = cluster_duration > MAX_QUEST_DURATION_HOURS * 60;
 
-        if gap_minutes > GAP_THRESHOLD_MINUTES || force_split {
+        let intent_split = should_split_by_intent(segmenter, &current_cluster, a);
+
+        if gap_minutes > GAP_THRESHOLD_MINUTES || force_split || intent_split {
             // Close current cluster, start a new one
             clusters.push(std::mem::take(&mut current_cluster));
         }
@@ -90,7 +95,7 @@ pub fn generate_quests(conn: &Connection) -> Result<usize> {
     // Filter: discard clusters with fewer than MIN_ARTIFACTS_PER_QUEST
     let valid_clusters: Vec<&Vec<&Artifact>> = clusters
         .iter()
-        .filter(|c| c.len() >= MIN_ARTIFACTS_PER_QUEST)
+        .filter(|c| c.len() >= MIN_ARTIFACTS_PER_QUEST && c.iter().any(|a| is_anchor(a)))
         .collect();
 
     let now = chrono_now();
@@ -102,7 +107,7 @@ pub fn generate_quests(conn: &Connection) -> Result<usize> {
         let ended_at = cluster.last().and_then(|a| a.visited_at.clone());
 
         // Generate auto_name (pass cluster artifact_ids for domain/keyword extraction)
-        let auto_name = auto_name_quest(conn, cluster)?;
+        let auto_name = auto_name_quest(conn, segmenter, cluster)?;
 
         conn.execute(
             r#"INSERT INTO quests (id, auto_name, started_at, ended_at, status, created_at, updated_at)
@@ -115,7 +120,7 @@ pub fn generate_quests(conn: &Connection) -> Result<usize> {
             conn.execute(
                 r#"INSERT OR IGNORE INTO quest_artifacts (quest_id, artifact_id, added_at, is_anchor)
                    VALUES (?1, ?2, ?3, ?4)"#,
-                params![quest_id, a.id, now, if a.is_bookmarked { 1 } else { 0 }],
+                params![quest_id, a.id, now, if is_anchor(a) { 1 } else { 0 }],
             )?;
         }
 
@@ -123,6 +128,46 @@ pub fn generate_quests(conn: &Connection) -> Result<usize> {
     }
 
     Ok(created)
+}
+
+fn should_split_by_intent(
+    segmenter: &Segmenter,
+    current_cluster: &[&Artifact],
+    current: &Artifact,
+) -> bool {
+    if current.page_category.as_deref() != Some("search_query") {
+        return false;
+    }
+
+    let Some(prev) = current_cluster
+        .iter()
+        .rev()
+        .find(|a| a.page_category.as_deref() == Some("search_query"))
+    else {
+        return false;
+    };
+
+    let prev_text = quest_intent_text(prev);
+    let current_text = quest_intent_text(current);
+    let prev_tokens = segmenter.cut_for_search(&prev_text);
+    let current_tokens = segmenter.cut_for_search(&current_text);
+
+    jaccard_similarity(&prev_tokens, &current_tokens) < 0.1
+}
+
+fn quest_intent_text(artifact: &Artifact) -> String {
+    artifact
+        .extracted_query
+        .as_deref()
+        .or(artifact.title.as_deref())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn is_anchor(artifact: &Artifact) -> bool {
+    artifact.page_category.as_deref() == Some("search_query")
+        || artifact.is_bookmarked
+        || artifact.visit_count >= 3
 }
 
 /// Calculate time gap in minutes between two ISO 8601 timestamps using SQLite JULIANDAY.
@@ -142,11 +187,26 @@ fn calc_gap_minutes(conn: &Connection, ts1: &Option<String>, ts2: &Option<String
 // 2. auto_name_quest — Generate human-readable Quest name
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn auto_name_quest(conn: &Connection, cluster: &[&Artifact]) -> Result<String> {
+fn auto_name_quest(
+    conn: &Connection,
+    segmenter: &Segmenter,
+    cluster: &[&Artifact],
+) -> Result<String> {
     // Collect artifact IDs
     let ids: Vec<&str> = cluster.iter().map(|a| a.id.as_str()).collect();
     if ids.is_empty() {
         return Ok("Unknown Quest".to_string());
+    }
+
+    if let Some(query) = cluster
+        .iter()
+        .find(|a| a.page_category.as_deref() == Some("search_query"))
+        .and_then(|a| a.extracted_query.as_deref())
+    {
+        let compact = compact_query_name(segmenter, query);
+        if !compact.is_empty() {
+            return Ok(compact);
+        }
     }
 
     // Get top 2-3 most frequent non-generic domains
@@ -243,6 +303,15 @@ fn auto_name_quest(conn: &Connection, cluster: &[&Artifact]) -> Result<String> {
     };
 
     Ok(name)
+}
+
+fn compact_query_name(segmenter: &Segmenter, query: &str) -> String {
+    let keywords = segmenter.extract_keywords(query, 4);
+    if keywords.is_empty() {
+        query.trim().to_string()
+    } else {
+        keywords.join(" ")
+    }
 }
 
 /// Extract a meaningful keyword from a title string.

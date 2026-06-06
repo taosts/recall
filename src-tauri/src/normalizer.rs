@@ -114,7 +114,8 @@ pub fn normalize_all(conn: &Connection) -> Result<NormalizeStats> {
                    noise_score = ?2,
                    extracted_query = ?3,
                    canonical_url = ?4,
-                   referrer_domain = ?5
+                   referrer_domain = ?5,
+                   embedding_version = 0
                WHERE id = ?6"#,
             params![
                 classification.category,
@@ -382,7 +383,8 @@ mod tests {
                 noise_score REAL NOT NULL DEFAULT 0.0,
                 extracted_query TEXT,
                 canonical_url TEXT,
-                referrer_domain TEXT
+                referrer_domain TEXT,
+                embedding_version INTEGER NOT NULL DEFAULT 1
             );
             INSERT INTO artifacts (id, title, url, domain, visited_at)
             VALUES (

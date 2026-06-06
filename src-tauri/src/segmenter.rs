@@ -123,6 +123,23 @@ fn is_noise_token(token: &str) -> bool {
     )
 }
 
+pub fn jaccard_similarity(tokens_a: &[String], tokens_b: &[String]) -> f64 {
+    let set_a: HashSet<&str> = tokens_a.iter().map(|s| s.as_str()).collect();
+    let set_b: HashSet<&str> = tokens_b.iter().map(|s| s.as_str()).collect();
+
+    if set_a.is_empty() && set_b.is_empty() {
+        return 0.0;
+    }
+
+    let intersection = set_a.intersection(&set_b).count() as f64;
+    let union = set_a.union(&set_b).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +166,13 @@ mod tests {
         let keywords = segmenter.extract_keywords("OpenWrt DNS DNS setup", 2);
         assert!(keywords.len() <= 2);
         assert!(keywords.iter().any(|t| t.eq_ignore_ascii_case("DNS")));
+    }
+
+    #[test]
+    fn test_jaccard_similarity() {
+        let a = vec!["驾考".to_string(), "题库".to_string()];
+        let b = vec!["驾考".to_string(), "科目一".to_string()];
+        let score = jaccard_similarity(&a, &b);
+        assert!(score > 0.0 && score < 1.0);
     }
 }

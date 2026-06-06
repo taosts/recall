@@ -32,12 +32,14 @@ pub fn init_db(db_path: &Path) -> Result<Connection> {
             noise_score     REAL NOT NULL DEFAULT 0.0,
             extracted_query TEXT,
             canonical_url   TEXT,
-            referrer_domain TEXT
+            referrer_domain TEXT,
+            embedding_version INTEGER NOT NULL DEFAULT 0
         );
     "#,
     )?;
 
     ensure_artifact_phase3_columns(&conn)?;
+    ensure_embedding_schema(&conn)?;
     ensure_fts_schema(&conn)?;
 
     conn.execute_batch(
@@ -58,6 +60,8 @@ pub fn init_db(db_path: &Path) -> Result<Connection> {
             ON artifacts(page_category);
         CREATE INDEX IF NOT EXISTS idx_artifacts_noise_score
             ON artifacts(noise_score);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_embedding_version
+            ON artifacts(embedding_version);
 
         CREATE TABLE IF NOT EXISTS quests (
             id          TEXT PRIMARY KEY,
@@ -116,6 +120,32 @@ fn ensure_artifact_phase3_columns(conn: &Connection) -> Result<()> {
     ensure_column(conn, "artifacts", "extracted_query", "TEXT")?;
     ensure_column(conn, "artifacts", "canonical_url", "TEXT")?;
     ensure_column(conn, "artifacts", "referrer_domain", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_embedding_schema(conn: &Connection) -> Result<()> {
+    ensure_column(
+        conn,
+        "artifacts",
+        "embedding_version",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS artifact_embeddings (
+            artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+            model       TEXT NOT NULL,
+            dims        INTEGER NOT NULL,
+            embedding   BLOB NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_artifact_embeddings_model
+            ON artifact_embeddings(model);
+    "#,
+    )?;
+
     Ok(())
 }
 
@@ -225,7 +255,8 @@ pub fn upsert_artifact(conn: &Connection, a: &crate::models::Artifact) -> Result
                noise_score   = excluded.noise_score,
                extracted_query = COALESCE(excluded.extracted_query, extracted_query),
                canonical_url = COALESCE(excluded.canonical_url, canonical_url),
-               referrer_domain = COALESCE(excluded.referrer_domain, referrer_domain)"#,
+               referrer_domain = COALESCE(excluded.referrer_domain, referrer_domain),
+               embedding_version = 0"#,
         params![
             a.id,
             a.r#type,
@@ -260,5 +291,64 @@ pub fn find_by_url(conn: &Connection, url: &str) -> Result<Option<String>> {
         Ok(Some(row.get(0)?))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("recall-db-test-{}.db", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn test_init_db_migrates_embedding_schema_from_old_artifacts_table() {
+        let db_path = temp_db_path();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE artifacts (
+                    id              TEXT PRIMARY KEY,
+                    type            TEXT NOT NULL DEFAULT 'history',
+                    title           TEXT,
+                    url             TEXT,
+                    domain          TEXT,
+                    created_at      TEXT NOT NULL,
+                    visited_at      TEXT,
+                    is_bookmarked   INTEGER NOT NULL DEFAULT 0,
+                    visit_count     INTEGER NOT NULL DEFAULT 0,
+                    source          TEXT,
+                    content         TEXT,
+                    user_note       TEXT,
+                    folder_path     TEXT,
+                    import_batch    TEXT,
+                    page_category   TEXT DEFAULT 'content',
+                    noise_score     REAL NOT NULL DEFAULT 0.0,
+                    extracted_query TEXT,
+                    canonical_url   TEXT,
+                    referrer_domain TEXT
+                );
+            "#,
+            )
+            .unwrap();
+        }
+
+        let conn = init_db(&db_path).unwrap();
+
+        assert!(table_has_column(&conn, "artifacts", "embedding_version").unwrap());
+        let embedding_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifact_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(embedding_tables, 1);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 }

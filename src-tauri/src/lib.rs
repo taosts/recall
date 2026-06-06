@@ -6,6 +6,7 @@ pub mod normalizer;
 pub mod quest;
 pub mod search;
 pub mod segmenter;
+pub mod semantic;
 
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -22,6 +23,8 @@ use crate::models::{
 
 pub struct AppDb(pub Mutex<Connection>);
 
+pub struct AppEmbeddings(pub Mutex<semantic::EmbeddingRuntime>);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tauri Commands
 // ─────────────────────────────────────────────────────────────────────────────
@@ -37,6 +40,7 @@ pub struct AppDb(pub Mutex<Connection>);
 fn search_artifacts(
     state: State<AppDb>,
     segmenter: State<segmenter::Segmenter>,
+    embeddings: State<AppEmbeddings>,
     query: String,
     date_from: Option<String>,
     date_to: Option<String>,
@@ -46,10 +50,15 @@ fn search_artifacts(
     if query.trim().is_empty() {
         return Ok(vec![]);
     }
+    let semantic_query = {
+        let mut runtime = embeddings.0.lock().map_err(|e| e.to_string())?;
+        runtime.embed_query_if_loaded(&query)?
+    };
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     search::search(
         &conn,
         &segmenter,
+        semantic_query.as_deref(),
         &query,
         date_from.as_deref(),
         date_to.as_deref(),
@@ -123,12 +132,18 @@ fn import_browser_data(
 #[tauri::command]
 fn get_context(
     state: State<AppDb>,
+    segmenter: State<segmenter::Segmenter>,
     artifact_id: String,
     window_minutes: Option<i64>,
 ) -> Result<Vec<Artifact>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    search::get_context(&conn, &artifact_id, window_minutes.unwrap_or(30))
-        .map_err(|e| e.to_string())
+    search::get_context(
+        &conn,
+        &segmenter,
+        &artifact_id,
+        window_minutes.unwrap_or(30),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Add or update a user note on an artifact.
@@ -152,14 +167,40 @@ fn normalize_artifacts(state: State<AppDb>) -> Result<normalizer::NormalizeStats
     normalizer::normalize_all(&conn).map_err(|e| e.to_string())
 }
 
+/// Return semantic embedding queue and model-cache status without downloading the model.
+#[tauri::command]
+fn get_embedding_progress(
+    state: State<AppDb>,
+    embeddings: State<AppEmbeddings>,
+) -> Result<semantic::EmbeddingProgress, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let runtime = embeddings.0.lock().map_err(|e| e.to_string())?;
+    semantic::embedding_progress(&conn, &runtime).map_err(|e| e.to_string())
+}
+
+/// Explicit opt-in embedding preparation. This may download the local BGE model.
+#[tauri::command]
+fn prepare_embeddings(
+    state: State<AppDb>,
+    embeddings: State<AppEmbeddings>,
+    batch_size: Option<usize>,
+) -> Result<semantic::EmbeddingRunStats, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut runtime = embeddings.0.lock().map_err(|e| e.to_string())?;
+    semantic::embed_pending_artifacts(&conn, &mut runtime, batch_size.unwrap_or(32))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 2: Quest commands
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn generate_quests(state: State<AppDb>) -> Result<usize, String> {
+fn generate_quests(
+    state: State<AppDb>,
+    segmenter: State<segmenter::Segmenter>,
+) -> Result<usize, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    quest::generate_quests(&conn).map_err(|e| e.to_string())
+    quest::generate_quests(&conn, &segmenter).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -214,24 +255,21 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let resolve_db = || -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
-                let app_data_dir = app.path().app_data_dir()?;
-                std::fs::create_dir_all(&app_data_dir)?;
-                let db_path = app_data_dir.join("recall.db");
-                Ok(db::init_db(&db_path)?)
-            };
-
-            let conn = resolve_db().unwrap_or_else(|_| {
-                let fallback = std::env::current_dir()
+            let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| {
+                std::env::current_dir()
                     .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join(".data");
-                std::fs::create_dir_all(&fallback)
-                    .expect("Failed to create fallback data directory");
-                let db_path = fallback.join("recall.db");
-                db::init_db(&db_path).expect("Failed to initialize database (fallback)")
+                    .join(".data")
             });
+            std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data directory");
+
+            let db_path = app_data_dir.join("recall.db");
+            let conn = db::init_db(&db_path).expect("Failed to initialize database");
+            let model_cache_dir = app_data_dir.join("models");
 
             app.manage(AppDb(Mutex::new(conn)));
+            app.manage(AppEmbeddings(Mutex::new(semantic::EmbeddingRuntime::new(
+                model_cache_dir,
+            ))));
             app.manage(segmenter::Segmenter::new());
             Ok(())
         })
@@ -243,6 +281,8 @@ pub fn run() {
             add_note,
             get_stats,
             normalize_artifacts,
+            get_embedding_progress,
+            prepare_embeddings,
             generate_quests,
             list_quests,
             get_quest,

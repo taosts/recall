@@ -45,7 +45,8 @@ mod tests {
                 noise_score REAL NOT NULL DEFAULT 0.0,
                 extracted_query TEXT,
                 canonical_url TEXT,
-                referrer_domain TEXT
+                referrer_domain TEXT,
+                embedding_version INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
@@ -78,6 +79,14 @@ mod tests {
             CREATE INDEX IF NOT EXISTS idx_artifacts_visited_at ON artifacts(visited_at);
             CREATE INDEX IF NOT EXISTS idx_artifacts_domain     ON artifacts(domain);
             CREATE INDEX IF NOT EXISTS idx_artifacts_url        ON artifacts(url);
+
+            CREATE TABLE IF NOT EXISTS artifact_embeddings (
+                artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+                model       TEXT NOT NULL,
+                dims        INTEGER NOT NULL,
+                embedding   BLOB NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS quests (
                 id          TEXT PRIMARY KEY,
@@ -163,6 +172,27 @@ mod tests {
         ids
     }
 
+    fn set_quality(
+        conn: &Connection,
+        id: &str,
+        page_category: &str,
+        noise_score: f64,
+        extracted_query: Option<&str>,
+    ) {
+        conn.execute(
+            r#"UPDATE artifacts
+               SET page_category = ?1, noise_score = ?2, extracted_query = ?3
+               WHERE id = ?4"#,
+            rusqlite::params![page_category, noise_score, extracted_query, id],
+        )
+        .unwrap();
+    }
+
+    fn generate_quests(conn: &Connection) -> usize {
+        let segmenter = Segmenter::new();
+        quest::generate_quests(conn, &segmenter).unwrap()
+    }
+
     // ═════════════════════════════════════════════════════════════════════
     // TEST GROUP 1: Database Schema & Initialization
     // ═════════════════════════════════════════════════════════════════════
@@ -221,7 +251,7 @@ mod tests {
     #[test]
     fn test_generate_quests_empty_db() {
         let conn = test_db();
-        let created = quest::generate_quests(&conn).unwrap();
+        let created = generate_quests(&conn);
         assert_eq!(created, 0, "No artifacts → no Quests");
     }
 
@@ -248,7 +278,7 @@ mod tests {
             false,
         );
 
-        let created = quest::generate_quests(&conn).unwrap();
+        let created = generate_quests(&conn);
         assert_eq!(created, 0, "Fewer than 3 artifacts should not form a Quest");
     }
 
@@ -258,7 +288,7 @@ mod tests {
         // 5 artifacts, 10 minutes apart → all within 45min gap → 1 Quest
         insert_cluster(&conn, "c1", 5, "2025-12-03T10:00:00", 10, "rust-lang.org");
 
-        let created = quest::generate_quests(&conn).unwrap();
+        let created = generate_quests(&conn);
         assert_eq!(created, 1, "5 closely-spaced artifacts should form 1 Quest");
 
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
@@ -279,7 +309,7 @@ mod tests {
         // Cluster B: 3 artifacts at 12:15, 12:20, 12:25
         insert_cluster(&conn, "b", 3, "2025-12-03T12:15:00", 5, "crates.io");
 
-        let created = quest::generate_quests(&conn).unwrap();
+        let created = generate_quests(&conn);
         assert_eq!(created, 2, "2-hour gap should split into 2 Quests");
 
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
@@ -302,8 +332,13 @@ mod tests {
             30,
             "stackoverflow.com",
         );
+        conn.execute(
+            "UPDATE artifacts SET visit_count = 3 WHERE id = 'long-17'",
+            [],
+        )
+        .unwrap();
 
-        let created = quest::generate_quests(&conn).unwrap();
+        let created = generate_quests(&conn);
         assert!(
             created >= 2,
             "8h max duration should force-split long browsing sessions, got {}",
@@ -316,16 +351,123 @@ mod tests {
         let conn = test_db();
         insert_cluster(&conn, "c", 5, "2025-12-03T10:00:00", 10, "example.com");
 
-        let created1 = quest::generate_quests(&conn).unwrap();
+        let created1 = generate_quests(&conn);
         assert_eq!(created1, 1);
 
         // Run again — should delete old auto Quests and recreate
-        let created2 = quest::generate_quests(&conn).unwrap();
+        let created2 = generate_quests(&conn);
         assert_eq!(created2, 1);
 
         // Should still be exactly 1 Quest total (not 2)
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         assert_eq!(quests.len(), 1);
+    }
+
+    #[test]
+    fn test_generate_quests_filters_high_noise_pages() {
+        let conn = test_db();
+        insert_artifact(
+            &conn,
+            "n1",
+            "Useful page 1",
+            "https://example.com/1",
+            "example.com",
+            "2025-12-03T10:00:00",
+            true,
+        );
+        insert_artifact(
+            &conn,
+            "n2",
+            "Useful page 2",
+            "https://example.com/2",
+            "example.com",
+            "2025-12-03T10:05:00",
+            false,
+        );
+        insert_artifact(
+            &conn,
+            "n3",
+            "SSO Login",
+            "https://sso.example.com/login",
+            "sso.example.com",
+            "2025-12-03T10:10:00",
+            true,
+        );
+        set_quality(&conn, "n3", "login", 0.9, None);
+
+        let created = generate_quests(&conn);
+
+        assert_eq!(
+            created, 0,
+            "High-noise page should be excluded before clustering"
+        );
+    }
+
+    #[test]
+    fn test_generate_quests_splits_different_search_intents() {
+        let conn = test_db();
+        insert_artifact(
+            &conn,
+            "s1",
+            "Bing Search",
+            "https://cn.bing.com/search?q=驾考",
+            "cn.bing.com",
+            "2025-12-03T10:00:00",
+            false,
+        );
+        set_quality(&conn, "s1", "search_query", 0.0, Some("驾考 科目一"));
+        insert_artifact(
+            &conn,
+            "s1-a",
+            "驾考 科目一 题库",
+            "https://drive.example.com/a",
+            "drive.example.com",
+            "2025-12-03T10:05:00",
+            false,
+        );
+        insert_artifact(
+            &conn,
+            "s1-b",
+            "驾驶证考试技巧",
+            "https://drive.example.com/b",
+            "drive.example.com",
+            "2025-12-03T10:10:00",
+            false,
+        );
+        insert_artifact(
+            &conn,
+            "s2",
+            "Bing Search",
+            "https://cn.bing.com/search?q=OpenWrt",
+            "cn.bing.com",
+            "2025-12-03T10:15:00",
+            false,
+        );
+        set_quality(&conn, "s2", "search_query", 0.0, Some("OpenWrt DNS"));
+        insert_artifact(
+            &conn,
+            "s2-a",
+            "OpenWrt DNSMasq",
+            "https://openwrt.org/a",
+            "openwrt.org",
+            "2025-12-03T10:20:00",
+            false,
+        );
+        insert_artifact(
+            &conn,
+            "s2-b",
+            "OpenWrt firewall",
+            "https://openwrt.org/b",
+            "openwrt.org",
+            "2025-12-03T10:25:00",
+            false,
+        );
+
+        let created = generate_quests(&conn);
+        let quests = quest::list_quests(&conn, 10, 0).unwrap();
+
+        assert_eq!(created, 2);
+        assert_eq!(quests.len(), 2);
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -336,7 +478,7 @@ mod tests {
     fn test_get_quest_returns_artifacts() {
         let conn = test_db();
         insert_cluster(&conn, "g", 4, "2025-12-03T10:00:00", 10, "github.com");
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
 
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         assert_eq!(quests.len(), 1);
@@ -357,7 +499,7 @@ mod tests {
     fn test_rename_quest_sets_confirmed() {
         let conn = test_db();
         insert_cluster(&conn, "r", 4, "2025-12-03T10:00:00", 10, "reddit.com");
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
 
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         let quest_id = &quests[0].id;
@@ -373,7 +515,7 @@ mod tests {
     fn test_archive_quest_hides_from_list() {
         let conn = test_db();
         insert_cluster(&conn, "ar", 4, "2025-12-03T10:00:00", 10, "archlinux.org");
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
 
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         assert_eq!(quests.len(), 1);
@@ -393,7 +535,7 @@ mod tests {
     fn test_archive_does_not_delete() {
         let conn = test_db();
         insert_cluster(&conn, "nd", 4, "2025-12-03T10:00:00", 10, "nixos.org");
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
 
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         let quest_id = quests[0].id.clone();
@@ -410,13 +552,13 @@ mod tests {
     fn test_rename_preserves_through_regenerate() {
         let conn = test_db();
         insert_cluster(&conn, "p", 4, "2025-12-03T10:00:00", 10, "python.org");
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
 
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         quest::rename_quest(&conn, &quests[0].id, "Learning Python").unwrap();
 
         // Regenerate — should NOT delete confirmed Quests
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
 
         // The confirmed Quest should survive
         let after = quest::list_quests(&conn, 10, 0).unwrap();
@@ -442,7 +584,7 @@ mod tests {
         // 2 hours later — separate Quest
         insert_cluster(&conn, "m2", 3, "2025-12-03T12:00:00", 5, "docs.rs");
 
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         assert_eq!(quests.len(), 2);
 
@@ -471,7 +613,7 @@ mod tests {
     fn test_get_quest_for_artifact() {
         let conn = test_db();
         let ids = insert_cluster(&conn, "qa", 4, "2025-12-03T10:00:00", 10, "example.com");
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
 
         // Each artifact should belong to exactly 1 Quest
         let quests = quest::get_quest_for_artifact(&conn, &ids[0]).unwrap();
@@ -494,7 +636,7 @@ mod tests {
     fn test_auto_name_contains_domain() {
         let conn = test_db();
         insert_cluster(&conn, "dn", 5, "2025-12-03T10:00:00", 10, "rust-lang.org");
-        quest::generate_quests(&conn).unwrap();
+        generate_quests(&conn);
 
         let quests = quest::list_quests(&conn, 10, 0).unwrap();
         assert_eq!(quests.len(), 1);
@@ -535,7 +677,7 @@ mod tests {
 
         let segmenter = Segmenter::new();
         let results =
-            search::search(&conn, &segmenter, "OpenWrt DNS", None, None, None, 30).unwrap();
+            search::search(&conn, &segmenter, None, "OpenWrt DNS", None, None, None, 30).unwrap();
         assert!(
             !results.is_empty(),
             "FTS search for 'OpenWrt DNS' should find the matching artifact"
@@ -558,7 +700,7 @@ mod tests {
         // The empty-query guard is in lib.rs (Tauri command layer), not search::search().
         // Direct FTS5 call with empty/whitespace input should return an error.
         let segmenter = Segmenter::new();
-        let result = search::search(&conn, &segmenter, "   ", None, None, None, 30);
+        let result = search::search(&conn, &segmenter, None, "   ", None, None, None, 30);
         assert!(
             result.is_err(),
             "Raw FTS5 search with empty query should error (guard is in lib.rs)"
@@ -598,7 +740,8 @@ mod tests {
         );
 
         // Context of ctx1 with 30-min window should include ctx2 but NOT ctx3
-        let context = search::get_context(&conn, "ctx1", 30).unwrap();
+        let segmenter = Segmenter::new();
+        let context = search::get_context(&conn, &segmenter, "ctx1", 30).unwrap();
         let context_ids: Vec<&str> = context.iter().map(|a| a.id.as_str()).collect();
         assert!(
             context_ids.contains(&"ctx2"),
@@ -608,6 +751,48 @@ mod tests {
             !context_ids.contains(&"ctx3"),
             "ctx3 (2 hours away) should NOT be in 30-min context"
         );
+    }
+
+    #[test]
+    fn test_context_ranking_prefers_related_anchor() {
+        let conn = test_db();
+        insert_artifact(
+            &conn,
+            "target",
+            "OpenWrt DNS setup",
+            "https://openwrt.org/dns",
+            "openwrt.org",
+            "2025-12-03T10:00:00",
+            false,
+        );
+        insert_artifact(
+            &conn,
+            "near",
+            "Unrelated login page",
+            "https://sso.example.edu/login",
+            "sso.example.edu",
+            "2025-12-03T10:01:00",
+            false,
+        );
+        conn.execute(
+            "UPDATE artifacts SET page_category = 'login', noise_score = 0.6 WHERE id = 'near'",
+            [],
+        )
+        .unwrap();
+        insert_artifact(
+            &conn,
+            "related",
+            "OpenWrt DNSMasq configuration",
+            "https://openwrt.org/dnsmasq",
+            "openwrt.org",
+            "2025-12-03T10:20:00",
+            true,
+        );
+
+        let segmenter = Segmenter::new();
+        let context = search::get_context(&conn, &segmenter, "target", 30).unwrap();
+
+        assert_eq!(context[0].id, "related");
     }
 
     #[test]
@@ -627,7 +812,8 @@ mod tests {
 
         // Search and verify note is returned
         let segmenter = Segmenter::new();
-        let results = search::search(&conn, &segmenter, "page", None, None, None, 30).unwrap();
+        let results =
+            search::search(&conn, &segmenter, None, "page", None, None, None, 30).unwrap();
         assert!(!results.is_empty());
         assert_eq!(
             results[0].artifact.user_note,
@@ -685,11 +871,12 @@ mod tests {
 
         // Step 2: Search works
         let segmenter = Segmenter::new();
-        let results = search::search(&conn, &segmenter, "reddit", None, None, None, 30).unwrap();
+        let results =
+            search::search(&conn, &segmenter, None, "reddit", None, None, None, 30).unwrap();
         assert!(!results.is_empty(), "Should find reddit pages");
 
         // Step 3: Generate Quests
-        let created = quest::generate_quests(&conn).unwrap();
+        let created = generate_quests(&conn);
         assert_eq!(created, 2, "Should create 2 Quests (different days)");
 
         // Step 4: List and verify

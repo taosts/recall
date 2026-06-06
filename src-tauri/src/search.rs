@@ -1,6 +1,7 @@
 use crate::expander::{build_fts_query_from_terms, QueryExpander};
 use crate::models::{Artifact, DbStats, SearchResult};
-use crate::segmenter::Segmenter;
+use crate::segmenter::{jaccard_similarity, Segmenter};
+use crate::semantic;
 use rusqlite::types::ToSql;
 use rusqlite::{params, Connection, Result};
 use std::collections::HashMap;
@@ -55,6 +56,7 @@ struct RankedArtifact {
 pub fn search(
     conn: &Connection,
     segmenter: &Segmenter,
+    semantic_query: Option<&[f32]>,
     query: &str,
     date_from: Option<&str>,
     date_to: Option<&str>,
@@ -72,11 +74,20 @@ pub fn search(
         search_bm25(conn, &expanded.fts_query, date_from, date_to, source, 50)?
     };
 
-    let ranked = reciprocal_rank_fusion(vec![layer1, layer2], 60);
+    let layer3 = if let Some(query_vector) = semantic_query {
+        semantic::search_semantic(conn, query_vector, date_from, date_to, source, 50)?
+            .into_iter()
+            .map(|(artifact, score)| RankedArtifact { artifact, score })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let ranked = reciprocal_rank_fusion(vec![layer1, layer2, layer3], 60);
     let mut results = Vec::new();
 
     for ranked in ranked.into_iter().take(50) {
-        let context = get_context(conn, &ranked.artifact.id, context_min)?;
+        let context = get_context(conn, segmenter, &ranked.artifact.id, context_min)?;
         let quests = crate::quest::get_quest_for_artifact(conn, &ranked.artifact.id)
             .ok()
             .filter(|q| !q.is_empty());
@@ -180,18 +191,15 @@ fn reciprocal_rank_fusion(ranked_lists: Vec<Vec<RankedArtifact>>, k: i64) -> Vec
 /// visited_at timestamp. This is the core memory-trigger feature.
 pub fn get_context(
     conn: &Connection,
+    segmenter: &Segmenter,
     artifact_id: &str,
     window_minutes: i64,
 ) -> Result<Vec<Artifact>> {
-    let visited_at: Option<String> = conn
-        .query_row(
-            "SELECT visited_at FROM artifacts WHERE id = ?1",
-            params![artifact_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(None);
+    let Some(target) = get_artifact(conn, artifact_id)? else {
+        return Ok(vec![]);
+    };
 
-    let Some(ts) = visited_at else {
+    let Some(ts) = target.visited_at.clone() else {
         return Ok(vec![]);
     };
 
@@ -207,18 +215,83 @@ pub fn get_context(
                    (JULIANDAY(visited_at) - JULIANDAY(?2)) * 1440
                  ) <= ?3
            ORDER BY ABS(JULIANDAY(visited_at) - JULIANDAY(?2))
-           LIMIT 20"#,
+           LIMIT 40"#,
     )?;
 
     let artifact_iter = stmt.query_map(params![artifact_id, ts, window_minutes], |row| {
         row_to_artifact(row)
     })?;
 
-    let mut context = Vec::new();
+    let mut candidates = Vec::new();
     for a in artifact_iter {
-        context.push(a?);
+        candidates.push(a?);
     }
-    Ok(context)
+
+    let target_tokens = context_tokens(segmenter, &target);
+    let mut scored: Vec<(Artifact, f64)> = candidates
+        .into_iter()
+        .map(|artifact| {
+            let score = score_context_artifact(segmenter, &target_tokens, &artifact);
+            (artifact, score)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(scored
+        .into_iter()
+        .take(20)
+        .map(|(artifact, _)| artifact)
+        .collect())
+}
+
+fn get_artifact(conn: &Connection, artifact_id: &str) -> Result<Option<Artifact>> {
+    let mut stmt = conn.prepare(
+        r#"SELECT id, type, title, url, domain, created_at, visited_at,
+                  is_bookmarked, visit_count, source, content, user_note,
+                  folder_path, import_batch, page_category, noise_score,
+                  extracted_query, canonical_url, referrer_domain
+           FROM artifacts
+           WHERE id = ?1
+           LIMIT 1"#,
+    )?;
+
+    let mut rows = stmt.query(params![artifact_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row_to_artifact(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn context_tokens(segmenter: &Segmenter, artifact: &Artifact) -> Vec<String> {
+    let text = [
+        artifact.title.as_deref().unwrap_or(""),
+        artifact.extracted_query.as_deref().unwrap_or(""),
+        artifact.domain.as_deref().unwrap_or(""),
+    ]
+    .join(" ");
+    segmenter.cut_for_search(&text)
+}
+
+fn score_context_artifact(
+    segmenter: &Segmenter,
+    target_tokens: &[String],
+    artifact: &Artifact,
+) -> f64 {
+    let tokens = context_tokens(segmenter, artifact);
+    let topic_sim = jaccard_similarity(target_tokens, &tokens);
+
+    3.0 * topic_sim
+        + 1.5 * if artifact.is_bookmarked { 1.0 } else { 0.0 }
+        + 0.5 * (artifact.visit_count as f64).min(10.0) / 10.0
+        + 1.0
+            * if artifact.page_category.as_deref() == Some("search_query") {
+                1.0
+            } else {
+                0.0
+            }
+        - 2.0 * artifact.noise_score.clamp(0.0, 1.0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -264,7 +337,7 @@ pub fn get_stats(conn: &Connection) -> Result<DbStats> {
 /// Update user_note for a specific artifact.
 pub fn set_user_note(conn: &Connection, artifact_id: &str, note: &str) -> Result<()> {
     conn.execute(
-        "UPDATE artifacts SET user_note = ?1 WHERE id = ?2",
+        "UPDATE artifacts SET user_note = ?1, embedding_version = 0 WHERE id = ?2",
         params![note, artifact_id],
     )?;
     Ok(())

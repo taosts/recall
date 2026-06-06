@@ -10,6 +10,8 @@ import type {
   ContextWindow,
   Quest,
   QuestSummary,
+  EmbeddingProgress,
+  EmbeddingRunStats,
 } from './types';
 
 /** Search artifacts with optional filters. */
@@ -73,6 +75,16 @@ export async function getStats(): Promise<DbStats> {
 /** Recompute Phase 3 normalization metadata for all artifacts. */
 export async function normalizeArtifacts(): Promise<NormalizeStats> {
   return invoke<NormalizeStats>('normalize_artifacts');
+}
+
+/** Get semantic embedding progress without loading/downloading the model. */
+export async function getEmbeddingProgress(): Promise<EmbeddingProgress> {
+  return invoke<EmbeddingProgress>('get_embedding_progress');
+}
+
+/** Explicitly prepare a batch of local embeddings. May download the model first. */
+export async function prepareEmbeddings(batchSize: number = 32): Promise<EmbeddingRunStats> {
+  return invoke<EmbeddingRunStats>('prepare_embeddings', { batchSize });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

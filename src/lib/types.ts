@@ -69,6 +69,26 @@ export interface NormalizeStats {
   high_noise: number;
 }
 
+export interface EmbeddingProgress {
+  done: number;
+  total: number;
+  pending: number;
+  embedded: number;
+  current_version: number;
+  model: string;
+  dims: number;
+  model_loaded: boolean;
+  cache_dir: string;
+}
+
+export interface EmbeddingRunStats {
+  scanned: number;
+  embedded: number;
+  skipped: number;
+  remaining: number;
+  errors: string[];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 2: Quest (探索任务) types
 // ─────────────────────────────────────────────────────────────────────────────

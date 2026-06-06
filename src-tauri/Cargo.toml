@@ -32,6 +32,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 url = "2.5.8"
 jieba-rs = "0.10.1"
+fastembed = { version = "5.16.0", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries-native-tls"] }
 
 [dev-dependencies]
 regex = "1"
