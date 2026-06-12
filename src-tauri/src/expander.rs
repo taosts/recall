@@ -391,8 +391,7 @@ mod tests {
 
     #[test]
     fn test_expand_excludes_platform_stopwords() {
-        let db_path =
-            std::env::temp_dir().join(format!("recall-exp-{}.db", uuid::Uuid::new_v4()));
+        let db_path = std::env::temp_dir().join(format!("recall-exp-{}.db", uuid::Uuid::new_v4()));
         let conn = crate::db::init_db(&db_path).unwrap();
 
         // Several pages that share the topic word AND a platform word ("知乎").
