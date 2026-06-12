@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { SearchResult, ContextWindow } from '../lib/types';
+import type { SearchResult, ContextWindow, SearchExplanation } from '../lib/types';
 import { addNote } from '../lib/commands';
 import { ContextPanel } from './ContextPanel';
 import { QuestBadge } from './QuestBadge';
@@ -66,6 +66,7 @@ function ResultCard({ result, contextMin, style }: CardProps) {
   const { artifact } = result;
   const [expanded, setExpanded] = useState(false);
   const [editingNote, setEditingNote] = useState(false);
+  const [showExplanation, setShowExplanation] = useState(false);
   const [note, setNote] = useState(artifact.user_note ?? '');
   const [saving, setSaving] = useState(false);
 
@@ -200,6 +201,14 @@ function ResultCard({ result, contextMin, style }: CardProps) {
         {/* Actions */}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px' }}>
           <button
+            className={`chip ${showExplanation ? 'active' : ''}`}
+            style={{ fontSize: '11px', padding: '2px 8px' }}
+            onClick={() => setShowExplanation(!showExplanation)}
+            title="Why this result?"
+          >
+            {showExplanation ? '▲ Why' : '▼ Why'}
+          </button>
+          <button
             className="chip"
             style={{ fontSize: '11px', padding: '2px 8px' }}
             onClick={() => setEditingNote(!editingNote)}
@@ -229,6 +238,8 @@ function ResultCard({ result, contextMin, style }: CardProps) {
           </button>
         </div>
       </div>
+
+      {showExplanation && <ExplanationStrip explanation={result.explanation} />}
 
       {/* Note editor */}
       {editingNote && (
@@ -276,6 +287,67 @@ function ResultCard({ result, contextMin, style }: CardProps) {
           visitedAt={artifact.visited_at}
           initialWindow={contextMin}
         />
+      )}
+    </div>
+  );
+}
+
+function ExplanationStrip({ explanation }: { explanation: SearchExplanation }) {
+  const { match_layers, semantic_score, noise_applied, noise_score, matched_terms } = explanation;
+
+  const hasLiteral = match_layers.some(layer => layer.layer === 'literal');
+  const hasExpanded = match_layers.some(layer => layer.layer === 'expanded');
+  const hasSemantic = match_layers.some(layer => layer.layer === 'semantic');
+
+  const literalRank = match_layers.find(layer => layer.layer === 'literal')?.rank;
+  const expandedRank = match_layers.find(layer => layer.layer === 'expanded')?.rank;
+
+  // The honest per-result signal: which query/expansion terms actually appear
+  // in this result's text (computed in the backend), not the raw vocabulary.
+  const terms = matched_terms.slice(0, 8);
+
+  return (
+    <div className="explanation-strip">
+      {hasLiteral && (
+        <div className="explain-row">
+          <span className="explain-icon">🔤</span>
+          <span className="explain-tag explain-tag-literal">Literal</span>
+          <span>Keyword match (rank #{literalRank})</span>
+        </div>
+      )}
+      {hasExpanded && (
+        <div className="explain-row">
+          <span className="explain-icon">🔀</span>
+          <span className="explain-tag explain-tag-expanded">Expanded</span>
+          <span>Expansion match (rank #{expandedRank})</span>
+        </div>
+      )}
+      {hasSemantic && (
+        <div className="explain-row">
+          <span className="explain-icon">🧠</span>
+          <span className="explain-tag explain-tag-semantic">Semantic</span>
+          <span>
+            Meaning similarity{semantic_score != null ? ` (${(semantic_score * 100).toFixed(0)}%)` : ''}
+          </span>
+        </div>
+      )}
+      {terms.length > 0 && (
+        <div className="explain-row">
+          <span className="explain-icon">🎯</span>
+          <span>Matched on</span>
+          <span className="explain-terms">
+            {terms.map((term, i) => (
+              <span key={`${term}-${i}`} className="explain-term">{term}</span>
+            ))}
+          </span>
+        </div>
+      )}
+      {noise_applied && (
+        <div className="explain-row">
+          <span className="explain-icon">🔇</span>
+          <span className="explain-tag explain-tag-noise">Noise</span>
+          <span>Downweighted (noise {(noise_score * 100).toFixed(0)}%)</span>
+        </div>
       )}
     </div>
   );

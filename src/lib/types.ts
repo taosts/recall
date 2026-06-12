@@ -32,6 +32,24 @@ export interface SearchResult {
   context: Artifact[];
   // Phase 2: Quest associations (populated when Quest system is active)
   quests?: QuestSummary[];
+  explanation: SearchExplanation;
+}
+
+export interface MatchLayer {
+  layer: 'literal' | 'expanded' | 'semantic';
+  rank: number;
+  raw_score: number;
+}
+
+export interface SearchExplanation {
+  match_layers: MatchLayer[];
+  expanded_terms: string[];
+  literal_query: string;
+  expanded_query: string;
+  semantic_score: number | null;
+  noise_applied: boolean;
+  noise_score: number;
+  matched_terms: string[];
 }
 
 export interface ImportStats {
@@ -106,6 +124,10 @@ export interface Quest {
   created_at: string;
   updated_at: string;
   artifacts: Artifact[];
+  origin_query: string | null;
+  anchor_ids: string[];
+  top_domains: [string, number][];
+  noise_count: number;
 }
 
 /** Lightweight Quest summary for list views (no artifact details). */

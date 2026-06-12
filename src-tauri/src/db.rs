@@ -33,6 +33,7 @@ pub fn init_db(db_path: &Path) -> Result<Connection> {
             extracted_query TEXT,
             canonical_url   TEXT,
             referrer_domain TEXT,
+            search_text     TEXT,
             embedding_version INTEGER NOT NULL DEFAULT 0
         );
     "#,
@@ -120,6 +121,7 @@ fn ensure_artifact_phase3_columns(conn: &Connection) -> Result<()> {
     ensure_column(conn, "artifacts", "extracted_query", "TEXT")?;
     ensure_column(conn, "artifacts", "canonical_url", "TEXT")?;
     ensure_column(conn, "artifacts", "referrer_domain", "TEXT")?;
+    ensure_column(conn, "artifacts", "search_text", "TEXT")?;
     Ok(())
 }
 
@@ -150,7 +152,7 @@ fn ensure_embedding_schema(conn: &Connection) -> Result<()> {
 }
 
 fn ensure_fts_schema(conn: &Connection) -> Result<()> {
-    let fts_ready = table_has_column(conn, "artifacts_fts", "extracted_query")?;
+    let fts_ready = table_has_column(conn, "artifacts_fts", "search_text")?;
 
     conn.execute_batch(
         r#"
@@ -174,6 +176,7 @@ fn ensure_fts_schema(conn: &Connection) -> Result<()> {
             user_note,
             folder_path,
             extracted_query,
+            search_text,
             content='artifacts',
             content_rowid='rowid',
             tokenize='unicode61'
@@ -181,26 +184,26 @@ fn ensure_fts_schema(conn: &Connection) -> Result<()> {
 
         CREATE TRIGGER artifacts_ai
         AFTER INSERT ON artifacts BEGIN
-            INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path, extracted_query)
+            INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path, extracted_query, search_text)
             VALUES (new.rowid, new.title, new.url, new.domain,
-                    new.content, new.user_note, new.folder_path, new.extracted_query);
+                    new.content, new.user_note, new.folder_path, new.extracted_query, new.search_text);
         END;
 
         CREATE TRIGGER artifacts_ad
         AFTER DELETE ON artifacts BEGIN
-            INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path, extracted_query)
+            INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path, extracted_query, search_text)
             VALUES ('delete', old.rowid, old.title, old.url, old.domain,
-                    old.content, old.user_note, old.folder_path, old.extracted_query);
+                    old.content, old.user_note, old.folder_path, old.extracted_query, old.search_text);
         END;
 
         CREATE TRIGGER artifacts_au
         AFTER UPDATE ON artifacts BEGIN
-            INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path, extracted_query)
+            INSERT INTO artifacts_fts(artifacts_fts, rowid, title, url, domain, content, user_note, folder_path, extracted_query, search_text)
             VALUES ('delete', old.rowid, old.title, old.url, old.domain,
-                    old.content, old.user_note, old.folder_path, old.extracted_query);
-            INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path, extracted_query)
+                    old.content, old.user_note, old.folder_path, old.extracted_query, old.search_text);
+            INSERT INTO artifacts_fts(rowid, title, url, domain, content, user_note, folder_path, extracted_query, search_text)
             VALUES (new.rowid, new.title, new.url, new.domain,
-                    new.content, new.user_note, new.folder_path, new.extracted_query);
+                    new.content, new.user_note, new.folder_path, new.extracted_query, new.search_text);
         END;
 
         INSERT INTO artifacts_fts(artifacts_fts) VALUES('rebuild');
@@ -338,6 +341,8 @@ mod tests {
         let conn = init_db(&db_path).unwrap();
 
         assert!(table_has_column(&conn, "artifacts", "embedding_version").unwrap());
+        assert!(table_has_column(&conn, "artifacts", "search_text").unwrap());
+        assert!(table_has_column(&conn, "artifacts_fts", "search_text").unwrap());
         let embedding_tables: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifact_embeddings'",

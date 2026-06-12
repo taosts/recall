@@ -38,7 +38,34 @@ pub struct Artifact {
     pub referrer_domain: Option<String>,
 }
 
-/// A search result enriched with BM25 relevance score and temporal context.
+/// Describes which search layer contributed to a result.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MatchLayer {
+    /// "literal" | "expanded" | "semantic"
+    pub layer: String,
+    /// 1-based rank within this layer.
+    pub rank: usize,
+    /// Raw score from the layer (BM25 magnitude or cosine similarity).
+    pub raw_score: f64,
+}
+
+/// Explanation of why a result was returned.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SearchExplanation {
+    pub match_layers: Vec<MatchLayer>,
+    pub expanded_terms: Vec<String>,
+    pub literal_query: String,
+    /// Empty string if identical to literal_query.
+    pub expanded_query: String,
+    pub semantic_score: Option<f64>,
+    pub noise_applied: bool,
+    pub noise_score: f64,
+    /// Query/expansion terms that actually appear in this result's text — the
+    /// honest "matched on" set surfaced in the Why panel.
+    pub matched_terms: Vec<String>,
+}
+
+/// A search result enriched with relevance score, temporal context, and explanation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     pub artifact: Artifact,
@@ -49,6 +76,8 @@ pub struct SearchResult {
     /// Phase 2: Quest associations
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quests: Option<Vec<QuestSummary>>,
+    /// Phase 4: visible explanation for result ranking.
+    pub explanation: SearchExplanation,
 }
 
 /// Statistics returned after a browser import operation.
@@ -106,6 +135,14 @@ pub struct Quest {
     pub updated_at: String,
     /// All artifacts belonging to this Quest, ordered by visited_at
     pub artifacts: Vec<Artifact>,
+    /// The first search query that kicked off this exploration.
+    pub origin_query: Option<String>,
+    /// IDs of anchor artifacts: bookmarks, high-visit pages, or search queries.
+    pub anchor_ids: Vec<String>,
+    /// Top domains by weighted visit count.
+    pub top_domains: Vec<(String, i64)>,
+    /// Number of low-value pages hidden by default in the Quest view.
+    pub noise_count: i64,
 }
 
 /// Lightweight Quest summary for list views (no artifact details).
@@ -237,6 +274,10 @@ mod tests {
             created_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-06-01T00:00:00Z".into(),
             artifacts: vec![sample_artifact()],
+            origin_query: Some("驾考宝典的题库哪里来的".into()),
+            anchor_ids: vec!["art-001".into()],
+            top_domains: vec![("doc.rust-lang.org".into(), 5)],
+            noise_count: 0,
         };
 
         let json = serde_json::to_string(&quest).expect("serialize");
@@ -278,6 +319,20 @@ mod tests {
             score: -3.14,
             context: vec![sample_artifact()],
             quests: None,
+            explanation: SearchExplanation {
+                match_layers: vec![MatchLayer {
+                    layer: "literal".into(),
+                    rank: 1,
+                    raw_score: -3.14,
+                }],
+                expanded_terms: vec!["考驾照".into(), "驾考".into()],
+                literal_query: "\"考驾照\"".into(),
+                expanded_query: "\"考驾照\" OR \"驾考\" OR \"驾照\"".into(),
+                semantic_score: None,
+                noise_applied: false,
+                noise_score: 0.0,
+                matched_terms: vec!["考驾照".into()],
+            },
         };
 
         let json = serde_json::to_string(&result).expect("serialize");
@@ -287,6 +342,7 @@ mod tests {
         assert_eq!(v["artifact"]["id"], "art-001");
         assert!(v["context"].is_array());
         assert_eq!(v["context"].as_array().unwrap().len(), 1);
+        assert!(v["explanation"]["match_layers"].is_array());
     }
 
     #[test]

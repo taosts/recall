@@ -6,6 +6,7 @@ use crate::models::{Artifact, Quest, QuestSummary};
 use crate::search::row_to_artifact;
 use crate::segmenter::{jaccard_similarity, Segmenter};
 use rusqlite::{params, Connection, Result};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -415,6 +416,36 @@ pub fn get_quest(conn: &Connection, quest_id: &str) -> Result<Quest> {
         artifacts.push(a?);
     }
 
+    let origin_query = artifacts
+        .iter()
+        .find(|a| a.page_category.as_deref() == Some("search_query"))
+        .and_then(|a| a.extracted_query.clone());
+
+    let anchor_ids: Vec<String> = artifacts
+        .iter()
+        .filter(|a| {
+            a.is_bookmarked
+                || a.visit_count >= 3
+                || a.page_category.as_deref() == Some("search_query")
+        })
+        .map(|a| a.id.clone())
+        .collect();
+
+    let mut domain_counts: HashMap<String, i64> = HashMap::new();
+    for artifact in &artifacts {
+        if let Some(domain) = artifact.domain.as_ref() {
+            *domain_counts.entry(domain.clone()).or_insert(0) += artifact.visit_count.max(1);
+        }
+    }
+    let mut top_domains: Vec<(String, i64)> = domain_counts.into_iter().collect();
+    top_domains.sort_by(|a, b| b.1.cmp(&a.1));
+    top_domains.truncate(5);
+
+    let noise_count = artifacts
+        .iter()
+        .filter(|artifact| artifact.noise_score > 0.5)
+        .count() as i64;
+
     Ok(Quest {
         id,
         name,
@@ -425,6 +456,10 @@ pub fn get_quest(conn: &Connection, quest_id: &str) -> Result<Quest> {
         created_at,
         updated_at,
         artifacts,
+        origin_query,
+        anchor_ids,
+        top_domains,
+        noise_count,
     })
 }
 

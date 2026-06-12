@@ -82,6 +82,7 @@ fn detect_browsers() -> Vec<BrowserInfo> {
 #[tauri::command]
 fn import_browser_data(
     state: State<AppDb>,
+    segmenter: State<segmenter::Segmenter>,
     browser: String,
     data_type: String,
     limit_days: Option<i64>,
@@ -120,6 +121,13 @@ fn import_browser_data(
             }
             Err(e) => combined.errors.push(e),
         }
+    }
+
+    // Recompute normalization metadata + FTS search_text for the newly imported
+    // rows. Owned here (rather than inside import.rs) so the segmenter is in scope
+    // and we run it once even when data_type == "all".
+    if let Err(e) = normalizer::normalize_all(&conn, &segmenter) {
+        combined.errors.push(format!("Normalize error: {}", e));
     }
 
     Ok(combined)
@@ -162,9 +170,12 @@ fn get_stats(state: State<AppDb>) -> Result<DbStats, String> {
 
 /// Recompute Phase 3 normalization metadata for all artifacts.
 #[tauri::command]
-fn normalize_artifacts(state: State<AppDb>) -> Result<normalizer::NormalizeStats, String> {
+fn normalize_artifacts(
+    state: State<AppDb>,
+    segmenter: State<segmenter::Segmenter>,
+) -> Result<normalizer::NormalizeStats, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    normalizer::normalize_all(&conn).map_err(|e| e.to_string())
+    normalizer::normalize_all(&conn, &segmenter).map_err(|e| e.to_string())
 }
 
 /// Return semantic embedding queue and model-cache status without downloading the model.
@@ -266,11 +277,26 @@ pub fn run() {
             let conn = db::init_db(&db_path).expect("Failed to initialize database");
             let model_cache_dir = app_data_dir.join("models");
 
+            // Build the shared segmenter, then — on first run after upgrade or for
+            // a legacy DB — backfill normalization metadata and the jieba-segmented
+            // FTS `search_text` so Chinese literal search works before any query is
+            // served. Runs only when some row still lacks `search_text`.
+            let segmenter = segmenter::Segmenter::new();
+            match normalizer::backfill_needed(&conn) {
+                Ok(true) => {
+                    if let Err(e) = normalizer::normalize_all(&conn, &segmenter) {
+                        eprintln!("Startup normalization backfill failed: {}", e);
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("Startup backfill check failed: {}", e),
+            }
+
             app.manage(AppDb(Mutex::new(conn)));
             app.manage(AppEmbeddings(Mutex::new(semantic::EmbeddingRuntime::new(
                 model_cache_dir,
             ))));
-            app.manage(segmenter::Segmenter::new());
+            app.manage(segmenter);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

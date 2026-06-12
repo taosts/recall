@@ -6,7 +6,6 @@ use uuid::Uuid;
 
 use crate::db::{find_by_url, upsert_artifact};
 use crate::models::{Artifact, BrowserInfo, ImportStats};
-use crate::normalizer;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Browser path resolution
@@ -117,10 +116,6 @@ pub fn import_bookmarks(
         if let Some(root) = roots.get(root_key) {
             walk_bookmark_node(root, "", browser, batch, conn, &mut stats);
         }
-    }
-
-    if let Err(e) = normalizer::normalize_all(conn) {
-        stats.errors.push(format!("Normalize error: {}", e));
     }
 
     Ok(stats)
@@ -354,10 +349,6 @@ fn read_history_from_copy(
             },
             Err(e) => stats.errors.push(format!("DB lookup error: {}", e)),
         }
-    }
-
-    if let Err(e) = normalizer::normalize_all(conn) {
-        stats.errors.push(format!("Normalize error: {}", e));
     }
 
     Ok(stats)

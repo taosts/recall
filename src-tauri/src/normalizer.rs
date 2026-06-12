@@ -1,3 +1,4 @@
+use crate::segmenter::Segmenter;
 use rusqlite::{params, Connection, Result};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -45,13 +46,16 @@ struct NormalizerInput {
     title: Option<String>,
     url: Option<String>,
     domain: Option<String>,
+    folder_path: Option<String>,
+    user_note: Option<String>,
+    content: Option<String>,
 }
 
 /// Recompute standardization metadata for every artifact.
-pub fn normalize_all(conn: &Connection) -> Result<NormalizeStats> {
+pub fn normalize_all(conn: &Connection, segmenter: &Segmenter) -> Result<NormalizeStats> {
     let title_frequencies = load_title_frequencies(conn)?;
     let mut stmt = conn.prepare(
-        r#"SELECT id, title, url, domain
+        r#"SELECT id, title, url, domain, folder_path, user_note, content
            FROM artifacts
            ORDER BY visited_at ASC"#,
     )?;
@@ -62,6 +66,9 @@ pub fn normalize_all(conn: &Connection) -> Result<NormalizeStats> {
             title: row.get(1)?,
             url: row.get(2)?,
             domain: row.get(3)?,
+            folder_path: row.get(4)?,
+            user_note: row.get(5)?,
+            content: row.get(6)?,
         })
     })?;
 
@@ -108,6 +115,15 @@ pub fn normalize_all(conn: &Connection) -> Result<NormalizeStats> {
             stats.high_noise += 1;
         }
 
+        let search_text = build_search_text(
+            segmenter,
+            input.title.as_deref(),
+            extracted_query.as_deref(),
+            input.folder_path.as_deref(),
+            input.user_note.as_deref(),
+            input.content.as_deref(),
+        );
+
         conn.execute(
             r#"UPDATE artifacts
                SET page_category = ?1,
@@ -115,14 +131,16 @@ pub fn normalize_all(conn: &Connection) -> Result<NormalizeStats> {
                    extracted_query = ?3,
                    canonical_url = ?4,
                    referrer_domain = ?5,
+                   search_text = ?6,
                    embedding_version = 0
-               WHERE id = ?6"#,
+               WHERE id = ?7"#,
             params![
                 classification.category,
                 classification.noise_score,
                 extracted_query,
                 canonical_url,
                 Option::<String>::None,
+                search_text,
                 input.id,
             ],
         )?;
@@ -130,6 +148,45 @@ pub fn normalize_all(conn: &Connection) -> Result<NormalizeStats> {
     }
 
     Ok(stats)
+}
+
+/// Build the jieba-segmented, space-joined searchable text indexed by FTS5.
+///
+/// The `unicode61` tokenizer does not segment CJK text, so we pre-segment the
+/// human-language fields here. The result is always a (possibly empty) string,
+/// never NULL, so [`backfill_needed`] stays idempotent after a run.
+fn build_search_text(
+    segmenter: &Segmenter,
+    title: Option<&str>,
+    extracted_query: Option<&str>,
+    folder_path: Option<&str>,
+    user_note: Option<&str>,
+    content: Option<&str>,
+) -> String {
+    let combined = [
+        title.unwrap_or(""),
+        extracted_query.unwrap_or(""),
+        folder_path.unwrap_or(""),
+        user_note.unwrap_or(""),
+        content.unwrap_or(""),
+    ]
+    .join(" ");
+
+    if combined.trim().is_empty() {
+        return String::new();
+    }
+    segmenter.cut(&combined).join(" ")
+}
+
+/// True if any artifact still lacks a computed `search_text` (i.e. a legacy DB
+/// or freshly imported rows that have not been normalized yet).
+pub fn backfill_needed(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM artifacts WHERE search_text IS NULL LIMIT 1)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|exists| exists != 0)
 }
 
 fn load_title_frequencies(conn: &Connection) -> Result<HashMap<String, usize>> {
@@ -379,11 +436,15 @@ mod tests {
                 url TEXT,
                 domain TEXT,
                 visited_at TEXT,
+                folder_path TEXT,
+                user_note TEXT,
+                content TEXT,
                 page_category TEXT DEFAULT 'content',
                 noise_score REAL NOT NULL DEFAULT 0.0,
                 extracted_query TEXT,
                 canonical_url TEXT,
                 referrer_domain TEXT,
+                search_text TEXT,
                 embedding_version INTEGER NOT NULL DEFAULT 1
             );
             INSERT INTO artifacts (id, title, url, domain, visited_at)
@@ -398,20 +459,60 @@ mod tests {
         )
         .unwrap();
 
-        let stats = normalize_all(&conn).unwrap();
+        let stats = normalize_all(&conn, &Segmenter::new()).unwrap();
         assert_eq!(stats.total_scanned, 1);
         assert_eq!(stats.search_queries, 1);
 
-        let (category, query, canonical): (String, String, String) = conn
+        let (category, query, canonical, search_text): (String, String, String, String) = conn
             .query_row(
-                "SELECT page_category, extracted_query, canonical_url FROM artifacts WHERE id = 'a1'",
+                "SELECT page_category, extracted_query, canonical_url, search_text FROM artifacts WHERE id = 'a1'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
 
         assert_eq!(category, "search_query");
         assert_eq!(query, "驾考");
         assert_eq!(canonical, "https://cn.bing.com/search?q=%E9%A9%BE%E8%80%83");
+        // search_text must contain the segmented extracted query so a literal
+        // FTS MATCH on "驾考" can hit this row.
+        assert!(
+            search_text.contains("驾考"),
+            "search_text should contain the segmented query token, got {:?}",
+            search_text
+        );
+    }
+
+    #[test]
+    fn test_backfill_needed_flips_after_normalize() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE artifacts (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                url TEXT,
+                domain TEXT,
+                visited_at TEXT,
+                folder_path TEXT,
+                user_note TEXT,
+                content TEXT,
+                page_category TEXT DEFAULT 'content',
+                noise_score REAL NOT NULL DEFAULT 0.0,
+                extracted_query TEXT,
+                canonical_url TEXT,
+                referrer_domain TEXT,
+                search_text TEXT,
+                embedding_version INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO artifacts (id, title, url, domain, visited_at)
+            VALUES ('a1', '驾考宝典的题库哪里来的', 'https://example.com/a', 'example.com', '2026-01-01T00:00:00');
+        "#,
+        )
+        .unwrap();
+
+        assert!(backfill_needed(&conn).unwrap());
+        normalize_all(&conn, &Segmenter::new()).unwrap();
+        assert!(!backfill_needed(&conn).unwrap());
     }
 }

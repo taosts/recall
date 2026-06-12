@@ -60,6 +60,63 @@ const BUILTIN_SYNONYMS: &[(&str, &[&str])] = &[
     ("Rust", &["cargo", "crate", "rustup", "borrow checker"]),
 ];
 
+/// Platform/structural words that pollute co-occurrence / PRF expansion.
+/// These are not topical, so the auto-miners must never add them as expansion
+/// terms (they were the source of the "知乎"/generic-word noise). Curated
+/// synonyms and the user's own query tokens are unaffected by this list.
+const EXPANSION_STOPLIST: &[&str] = &[
+    "知乎",
+    "微博",
+    "贴吧",
+    "bilibili",
+    "哔哩哔哩",
+    "b站",
+    "csdn",
+    "简书",
+    "掘金",
+    "博客园",
+    "百度",
+    "谷歌",
+    "搜索",
+    "视频",
+    "图片",
+    "下载",
+    "官网",
+    "官方",
+    "首页",
+    "登录",
+    "注册",
+    "论坛",
+    "在线",
+    "免费",
+    "大全",
+    "最新",
+    "v2ex",
+    "太平洋",
+    // Generic interrogatives / structural Chinese — never topical. (Only mined
+    // expansion terms are filtered; the user's own query tokens are untouched,
+    // so queries like "科目一怎么考" still work.)
+    "哪里",
+    "怎么",
+    "怎么办",
+    "为什么",
+    "是什么",
+    "如何",
+    "多少",
+    "www",
+    "com",
+    "cn",
+    "http",
+    "https",
+    "html",
+    "index",
+];
+
+fn is_expansion_stopword(term: &str) -> bool {
+    let lower = term.to_lowercase();
+    EXPANSION_STOPLIST.iter().any(|word| *word == lower)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpandedQuery {
     pub original: String,
@@ -147,6 +204,9 @@ impl QueryExpander {
             for row in rows.flatten() {
                 let text = format!("{} {}", row.0, row.1);
                 for keyword in segmenter.extract_keywords(&text, 8) {
+                    if is_expansion_stopword(&keyword) {
+                        continue;
+                    }
                     if !tokens.iter().any(|t| t.eq_ignore_ascii_case(&keyword)) {
                         *counts.entry(keyword).or_insert(0) += 1;
                     }
@@ -158,7 +218,7 @@ impl QueryExpander {
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.len().cmp(&a.0.len())));
         ranked
             .into_iter()
-            .filter(|(_, count)| *count >= 2)
+            .filter(|(_, count)| *count >= 3)
             .take(6)
             .map(|(term, _)| term)
             .collect()
@@ -201,7 +261,11 @@ impl QueryExpander {
             text.push(' ');
         }
 
-        segmenter.extract_keywords(&text, 8)
+        segmenter
+            .extract_keywords(&text, 8)
+            .into_iter()
+            .filter(|keyword| !is_expansion_stopword(keyword))
+            .collect()
     }
 }
 
@@ -313,5 +377,51 @@ mod tests {
 
         assert!(expanded.expanded_terms.iter().any(|t| t == "OpenWrt"));
         assert!(expanded.fts_query.contains("OpenWrt"));
+    }
+
+    #[test]
+    fn test_is_expansion_stopword() {
+        assert!(is_expansion_stopword("知乎"));
+        assert!(is_expansion_stopword("Bilibili"));
+        assert!(is_expansion_stopword("WWW"));
+        // Contentful words must never be treated as stopwords.
+        assert!(!is_expansion_stopword("驾考"));
+        assert!(!is_expansion_stopword("题库"));
+    }
+
+    #[test]
+    fn test_expand_excludes_platform_stopwords() {
+        let db_path =
+            std::env::temp_dir().join(format!("recall-exp-{}.db", uuid::Uuid::new_v4()));
+        let conn = crate::db::init_db(&db_path).unwrap();
+
+        // Several pages that share the topic word AND a platform word ("知乎").
+        // Without the stoplist, co-occurrence mining would surface "知乎" and
+        // pull in unrelated 知乎 pages.
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO artifacts (id, type, title, url, domain, created_at)
+                 VALUES (?1, 'history', ?2, ?3, 'www.zhihu.com', '2025-01-01T00:00:00')",
+                rusqlite::params![
+                    format!("z{i}"),
+                    format!("驾考宝典题库讨论{i} - 知乎"),
+                    format!("https://www.zhihu.com/question/{i}"),
+                ],
+            )
+            .unwrap();
+        }
+
+        let segmenter = Segmenter::new();
+        let expanded = QueryExpander::new().expand(&conn, &segmenter, "驾考");
+
+        assert!(
+            !expanded.expanded_terms.iter().any(|t| t == "知乎"),
+            "platform stopword 知乎 must not appear in expansion: {:?}",
+            expanded.expanded_terms
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 }

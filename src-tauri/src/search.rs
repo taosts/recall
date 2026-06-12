@@ -1,5 +1,5 @@
 use crate::expander::{build_fts_query_from_terms, QueryExpander};
-use crate::models::{Artifact, DbStats, SearchResult};
+use crate::models::{Artifact, DbStats, MatchLayer, SearchExplanation, SearchResult};
 use crate::segmenter::{jaccard_similarity, Segmenter};
 use crate::semantic;
 use rusqlite::types::ToSql;
@@ -41,6 +41,8 @@ pub fn row_to_artifact(row: &rusqlite::Row) -> Result<Artifact> {
 struct RankedArtifact {
     artifact: Artifact,
     score: f64,
+    layer_tag: String,
+    layer_rank: usize,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,19 +67,33 @@ pub fn search(
 ) -> Result<Vec<SearchResult>> {
     let literal_terms = segmenter.cut_for_search(query);
     let literal_fts_query = build_fts_query_from_terms(&literal_terms);
-    let layer1 = search_bm25(conn, &literal_fts_query, date_from, date_to, source, 50)?;
+    let mut layer1 = search_bm25(conn, &literal_fts_query, date_from, date_to, source, 50)?;
+    for (i, result) in layer1.iter_mut().enumerate() {
+        result.layer_tag = "literal".into();
+        result.layer_rank = i + 1;
+    }
 
     let expanded = QueryExpander::new().expand(conn, segmenter, query);
-    let layer2 = if expanded.fts_query.is_empty() || expanded.fts_query == literal_fts_query {
+    let mut layer2 = if expanded.fts_query.is_empty() || expanded.fts_query == literal_fts_query {
         Vec::new()
     } else {
         search_bm25(conn, &expanded.fts_query, date_from, date_to, source, 50)?
     };
+    for (i, result) in layer2.iter_mut().enumerate() {
+        result.layer_tag = "expanded".into();
+        result.layer_rank = i + 1;
+    }
 
     let layer3 = if let Some(query_vector) = semantic_query {
         semantic::search_semantic(conn, query_vector, date_from, date_to, source, 50)?
             .into_iter()
-            .map(|(artifact, score)| RankedArtifact { artifact, score })
+            .enumerate()
+            .map(|(i, (artifact, score))| RankedArtifact {
+                artifact,
+                score,
+                layer_tag: "semantic".into(),
+                layer_rank: i + 1,
+            })
             .collect()
     } else {
         Vec::new()
@@ -86,17 +102,38 @@ pub fn search(
     let ranked = reciprocal_rank_fusion(vec![layer1, layer2, layer3], 60);
     let mut results = Vec::new();
 
-    for ranked in ranked.into_iter().take(50) {
+    for (ranked, layer_info) in ranked.into_iter().take(50) {
         let context = get_context(conn, segmenter, &ranked.artifact.id, context_min)?;
         let quests = crate::quest::get_quest_for_artifact(conn, &ranked.artifact.id)
             .ok()
             .filter(|q| !q.is_empty());
+        let semantic_score = layer_info
+            .iter()
+            .find(|layer| layer.layer == "semantic")
+            .map(|layer| layer.raw_score);
+        let matched_terms =
+            compute_matched_terms(&ranked.artifact, &literal_terms, &expanded.expanded_terms);
+        let explanation = SearchExplanation {
+            match_layers: layer_info,
+            expanded_terms: expanded.expanded_terms.clone(),
+            literal_query: literal_fts_query.clone(),
+            expanded_query: if expanded.fts_query == literal_fts_query {
+                String::new()
+            } else {
+                expanded.fts_query.clone()
+            },
+            semantic_score,
+            noise_applied: ranked.artifact.noise_score > 0.1,
+            noise_score: ranked.artifact.noise_score,
+            matched_terms,
+        };
 
         results.push(SearchResult {
             artifact: ranked.artifact,
             score: ranked.score,
             context,
             quests,
+            explanation,
         });
     }
 
@@ -148,36 +185,122 @@ fn search_bm25(
     while let Some(row) = rows.next()? {
         let artifact = row_to_artifact(row)?;
         let score: f64 = row.get(19)?;
-        results.push(RankedArtifact { artifact, score });
+        results.push(RankedArtifact {
+            artifact,
+            score,
+            layer_tag: String::new(),
+            layer_rank: 0,
+        });
     }
 
     Ok(results)
 }
 
-fn reciprocal_rank_fusion(ranked_lists: Vec<Vec<RankedArtifact>>, k: i64) -> Vec<RankedArtifact> {
-    let mut scores: HashMap<String, (Artifact, f64)> = HashMap::new();
+/// Terms from the literal query or its expansion that actually occur in this
+/// result's text. A cheap, honest signal for the "Why?" panel — case-insensitive
+/// substring over title/extracted_query/domain/url. Single-character tokens are
+/// skipped to avoid trivial matches.
+fn compute_matched_terms(
+    artifact: &Artifact,
+    literal_terms: &[String],
+    expanded_terms: &[String],
+) -> Vec<String> {
+    let haystack = [
+        artifact.title.as_deref().unwrap_or(""),
+        artifact.extracted_query.as_deref().unwrap_or(""),
+        artifact.domain.as_deref().unwrap_or(""),
+        artifact.url.as_deref().unwrap_or(""),
+    ]
+    .join(" ")
+    .to_lowercase();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut matched = Vec::new();
+    for term in literal_terms.iter().chain(expanded_terms.iter()) {
+        let trimmed = term.trim();
+        if trimmed.chars().count() < 2 {
+            continue;
+        }
+        let key = trimmed.to_lowercase();
+        if haystack.contains(&key) && seen.insert(key) {
+            matched.push(trimmed.to_string());
+            if matched.len() >= 10 {
+                break;
+            }
+        }
+    }
+    matched
+}
+
+/// Confidence weight per retrieval layer. Literal keyword hits are the most
+/// trustworthy; expansion (synonym / co-occurrence / PRF) is the least, so an
+/// expansion-only match cannot outrank a literal or anchor match at the same
+/// rank. Semantic sits in between.
+fn layer_weight(tag: &str) -> f64 {
+    match tag {
+        "literal" => 1.0,
+        "semantic" => 0.7,
+        "expanded" => 0.35,
+        _ => 1.0,
+    }
+}
+
+fn reciprocal_rank_fusion(
+    ranked_lists: Vec<Vec<RankedArtifact>>,
+    k: i64,
+) -> Vec<(RankedArtifact, Vec<MatchLayer>)> {
+    let mut scores: HashMap<String, (Artifact, f64, Vec<MatchLayer>)> = HashMap::new();
 
     for list in ranked_lists {
         for (idx, ranked) in list.into_iter().enumerate() {
+            if ranked.artifact.noise_score >= 0.8 {
+                continue;
+            }
             let rank = idx as f64 + 1.0;
             let rrf = 1.0 / (k as f64 + rank);
             let noise_multiplier = 1.0 - ranked.artifact.noise_score.clamp(0.0, 1.0) * 0.5;
-            let adjusted = rrf * noise_multiplier;
+            let layer_w = layer_weight(&ranked.layer_tag);
+            let anchor_boost = if ranked.artifact.is_bookmarked
+                || ranked.artifact.page_category.as_deref() == Some("search_query")
+            {
+                1.25
+            } else {
+                1.0
+            };
+            let adjusted = rrf * noise_multiplier * layer_w * anchor_boost;
+            let layer = MatchLayer {
+                layer: ranked.layer_tag.clone(),
+                rank: ranked.layer_rank,
+                raw_score: ranked.score,
+            };
 
             scores
                 .entry(ranked.artifact.id.clone())
-                .and_modify(|(_, score)| *score += adjusted)
-                .or_insert((ranked.artifact, adjusted));
+                .and_modify(|(_, score, layers)| {
+                    *score += adjusted;
+                    layers.push(layer.clone());
+                })
+                .or_insert((ranked.artifact, adjusted, vec![layer]));
         }
     }
 
-    let mut merged: Vec<RankedArtifact> = scores
+    let mut merged: Vec<(RankedArtifact, Vec<MatchLayer>)> = scores
         .into_iter()
-        .map(|(_, (artifact, score))| RankedArtifact { artifact, score })
+        .map(|(_, (artifact, score, layers))| {
+            (
+                RankedArtifact {
+                    artifact,
+                    score,
+                    layer_tag: String::new(),
+                    layer_rank: 0,
+                },
+                layers,
+            )
+        })
         .collect();
     merged.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        b.0.score
+            .partial_cmp(&a.0.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     merged
@@ -376,15 +499,20 @@ mod tests {
         let a = RankedArtifact {
             artifact: test_artifact("a", 0.0),
             score: -1.0,
+            layer_tag: "literal".into(),
+            layer_rank: 1,
         };
         let b = RankedArtifact {
             artifact: test_artifact("b", 0.0),
             score: -2.0,
+            layer_tag: "literal".into(),
+            layer_rank: 2,
         };
 
         let merged = reciprocal_rank_fusion(vec![vec![a.clone(), b], vec![a]], 60);
 
-        assert_eq!(merged[0].artifact.id, "a");
+        assert_eq!(merged[0].0.artifact.id, "a");
+        assert_eq!(merged[0].1.len(), 2);
         assert_eq!(merged.len(), 2);
     }
 
@@ -393,14 +521,70 @@ mod tests {
         let noisy = RankedArtifact {
             artifact: test_artifact("noisy", 1.0),
             score: -1.0,
+            layer_tag: "literal".into(),
+            layer_rank: 1,
         };
         let clean = RankedArtifact {
             artifact: test_artifact("clean", 0.0),
             score: -1.0,
+            layer_tag: "literal".into(),
+            layer_rank: 2,
         };
 
         let merged = reciprocal_rank_fusion(vec![vec![noisy, clean]], 60);
 
-        assert_eq!(merged[0].artifact.id, "clean");
+        assert_eq!(merged[0].0.artifact.id, "clean");
+    }
+
+    #[test]
+    fn test_rrf_prefers_literal_over_expanded_at_same_rank() {
+        // Two separate layers, each contributing a rank-1 result. With flat RRF
+        // they would tie; the per-layer confidence weight must put the literal
+        // hit first so expansion-only noise can't outrank a keyword match.
+        let literal = RankedArtifact {
+            artifact: test_artifact("lit", 0.0),
+            score: -1.0,
+            layer_tag: "literal".into(),
+            layer_rank: 1,
+        };
+        let expanded = RankedArtifact {
+            artifact: test_artifact("exp", 0.0),
+            score: -1.0,
+            layer_tag: "expanded".into(),
+            layer_rank: 1,
+        };
+
+        let merged = reciprocal_rank_fusion(vec![vec![literal], vec![expanded]], 60);
+
+        assert_eq!(merged[0].0.artifact.id, "lit");
+    }
+
+    #[test]
+    fn test_rrf_anchor_boost_prefers_bookmark() {
+        // Same layer and same rank, but one is a bookmark (anchor). With both at
+        // rank 1 their base RRF ties, so the anchor boost alone must decide it.
+        let mut anchor = test_artifact("anchor", 0.0);
+        anchor.is_bookmarked = true;
+        let plain = test_artifact("plain", 0.0);
+
+        let merged = reciprocal_rank_fusion(
+            vec![
+                vec![RankedArtifact {
+                    artifact: anchor,
+                    score: -1.0,
+                    layer_tag: "literal".into(),
+                    layer_rank: 1,
+                }],
+                vec![RankedArtifact {
+                    artifact: plain,
+                    score: -1.0,
+                    layer_tag: "literal".into(),
+                    layer_rank: 1,
+                }],
+            ],
+            60,
+        );
+
+        assert_eq!(merged[0].0.artifact.id, "anchor");
     }
 }

@@ -232,6 +232,183 @@ code, .mono {
 .badge-quest   { background: var(--quest-glow); color: var(--quest-accent); border-color: hsla(250, 70%, 65%, 0.3); }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+   Search Explanation Strip
+───────────────────────────────────────────────────────────────────────────── */
+.explanation-strip {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: 12px;
+  line-height: 1.7;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: fadeIn var(--t-mid) var(--ease) both;
+}
+
+.explain-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.explain-row .explain-icon {
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.explain-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.explain-tag-literal {
+  background: hsla(210, 60%, 65%, 0.15);
+  color: hsl(210, 60%, 70%);
+}
+
+.explain-tag-expanded {
+  background: var(--accent-glow);
+  color: var(--accent);
+}
+
+.explain-tag-semantic {
+  background: var(--quest-glow);
+  color: var(--quest-accent);
+}
+
+.explain-tag-noise {
+  background: hsla(0, 0%, 50%, 0.12);
+  color: var(--text-muted);
+}
+
+.explain-terms {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.explain-term {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Quest Memory Fragment
+───────────────────────────────────────────────────────────────────────────── */
+.quest-origin {
+  padding: 10px 12px;
+  background: var(--accent-glow);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-md);
+  font-size: 13px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.quest-origin .quest-origin-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.quest-timeline-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  transition: background var(--t-fast) var(--ease);
+}
+
+.quest-timeline-item:hover {
+  background: var(--bg-hover);
+}
+
+.quest-timeline-item.is-anchor {
+  background: var(--accent-glow);
+}
+
+.quest-timeline-item.is-search {
+  background: hsla(210, 60%, 65%, 0.08);
+}
+
+.quest-timeline-item.is-noise {
+  opacity: 0.45;
+}
+
+.quest-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex-shrink: 0;
+}
+
+.quest-dot-bookmark  { background: var(--accent); }
+.quest-dot-search    { background: hsl(210, 70%, 65%); }
+.quest-dot-frequent  { background: var(--success); }
+.quest-dot-default   { background: var(--quest-accent); }
+.quest-dot-noise     { background: var(--text-muted); }
+
+.quest-domains {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.quest-domain-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.quest-domain-count {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.quest-noise-fold {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.quest-noise-fold:hover {
+  color: var(--text-secondary);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
    Animations
 ───────────────────────────────────────────────────────────────────────────── */
 @keyframes fadeIn {

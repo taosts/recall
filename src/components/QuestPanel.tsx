@@ -259,6 +259,7 @@ function QuestCard({
   onArchive, onStartMerge, selectionMode, isSelected, onToggleSelect,
   formatDate, formatTime, statusLabel, statusClass,
 }: QuestCardProps) {
+  const [showNoise, setShowNoise] = useState(false);
   const dateRange =
     quest.started_at && quest.ended_at
       ? `${formatDate(quest.started_at)} — ${formatDate(quest.ended_at)}`
@@ -368,62 +369,105 @@ function QuestCard({
       {/* Expanded timeline */}
       {isExpanded && expandedQuest && (
         <div style={{ marginTop: '14px', borderTop: '1px solid var(--border)', paddingTop: '12px' }}>
-          {/* Timeline items */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
-            {expandedQuest.artifacts.map((a) => (
-              <div key={a.id} style={{
-                display: 'flex',
-                alignItems: 'flex-start',
-                gap: '10px',
-                fontSize: '12px',
-                padding: '6px 8px',
-                borderRadius: 'var(--r-sm)',
-                background: a.is_bookmarked ? 'var(--accent-glow)' : 'transparent',
-              }}>
-                {/* Time */}
-                <span style={{
-                  color: 'var(--text-muted)',
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: '11px',
-                  whiteSpace: 'nowrap',
-                  minWidth: '50px',
-                }}>
-                  {formatTime(a.visited_at)}
-                </span>
+          {expandedQuest.origin_query && (
+            <div className="quest-origin">
+              <span className="quest-origin-icon">🔍</span>
+              <span>Started from: <strong>"{expandedQuest.origin_query}"</strong></span>
+            </div>
+          )}
 
-                {/* Dot */}
-                <span style={{
-                  width: '6px',
-                  height: '6px',
-                  borderRadius: '50%',
-                  background: a.is_bookmarked ? 'var(--accent)' : 'var(--quest-accent)',
-                  marginTop: '5px',
-                  flexShrink: 0,
-                }} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '12px' }}>
+            {expandedQuest.artifacts
+              .filter(artifact => showNoise || artifact.noise_score <= 0.5)
+              .map((artifact) => {
+                const isAnchor = expandedQuest.anchor_ids.includes(artifact.id);
+                const isSearch = artifact.page_category === 'search_query';
+                const isNoise = artifact.noise_score > 0.5;
 
-                {/* Title + URL */}
-                <div style={{ minWidth: 0 }}>
-                  <div style={{
-                    color: 'var(--text-primary)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}>
-                    {a.is_bookmarked && <span style={{ color: 'var(--accent)', marginRight: '4px' }}>★</span>}
-                    {a.title || a.url || 'Untitled'}
-                  </div>
-                  {a.domain && (
-                    <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
-                      {a.domain}
+                const dotClass = isSearch
+                  ? 'quest-dot-search'
+                  : artifact.is_bookmarked
+                    ? 'quest-dot-bookmark'
+                    : artifact.visit_count >= 3
+                      ? 'quest-dot-frequent'
+                      : isNoise
+                        ? 'quest-dot-noise'
+                        : 'quest-dot-default';
+
+                const itemClass = [
+                  'quest-timeline-item',
+                  isAnchor ? 'is-anchor' : '',
+                  isSearch ? 'is-search' : '',
+                  isNoise ? 'is-noise' : '',
+                ].filter(Boolean).join(' ');
+
+                return (
+                  <div key={artifact.id} className={itemClass}>
+                    <span style={{
+                      color: 'var(--text-muted)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: '11px',
+                      whiteSpace: 'nowrap',
+                      minWidth: '50px',
+                    }}>
+                      {formatTime(artifact.visited_at)}
+                    </span>
+
+                    <span className={`quest-dot ${dotClass}`} />
+
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{
+                        color: 'var(--text-primary)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {artifact.is_bookmarked && (
+                          <span style={{ color: 'var(--accent)', marginRight: '4px' }}>★</span>
+                        )}
+                        {isSearch && artifact.extracted_query
+                          ? <span style={{ fontStyle: 'italic' }}>🔍 "{artifact.extracted_query}"</span>
+                          : (artifact.title || artifact.url || 'Untitled')
+                        }
+                      </div>
+                      {artifact.domain && (
+                        <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                          {artifact.domain}
+                          {artifact.visit_count > 1 && <span> · {artifact.visit_count} visits</span>}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              </div>
-            ))}
+                  </div>
+                );
+              })}
           </div>
 
+          {expandedQuest.noise_count > 0 && (
+            <div className="quest-noise-fold" onClick={() => setShowNoise(!showNoise)}>
+              <span>🔇</span>
+              <span>
+                {showNoise
+                  ? 'Hide noise pages'
+                  : `${expandedQuest.noise_count} noise page${expandedQuest.noise_count !== 1 ? 's' : ''} hidden (redirects, logins)`
+                }
+              </span>
+              <span style={{ fontSize: '10px' }}>{showNoise ? '▲' : '▼'}</span>
+            </div>
+          )}
+
+          {expandedQuest.top_domains.length > 0 && (
+            <div className="quest-domains">
+              {expandedQuest.top_domains.map(([domain, count]) => (
+                <span key={domain} className="quest-domain-chip">
+                  {domain}
+                  <span className="quest-domain-count">({count})</span>
+                </span>
+              ))}
+            </div>
+          )}
+
           {/* Actions */}
-          <div style={{ display: 'flex', gap: '8px' }}>
+          <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
             <button onClick={(e) => { e.stopPropagation(); onArchive(quest.id); }}
               className="btn btn-ghost" style={{ fontSize: '11px', padding: '4px 10px' }}>
               Archive
