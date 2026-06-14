@@ -5,7 +5,7 @@ import { SearchResults } from './components/SearchResults';
 import { ImportWizard }  from './components/ImportWizard';
 import { StatsBar }      from './components/StatsBar';
 import { QuestPanel }    from './components/QuestPanel';
-import { searchArtifacts, getStats } from './lib/commands';
+import { searchArtifacts, getStats, clearUserData } from './lib/commands';
 import type { SearchResult, SearchFilters, ContextWindow } from './lib/types';
 
 type View = 'wizard' | 'search' | 'quests';
@@ -54,6 +54,24 @@ function App() {
     setStatsKey(k => k + 1); // refresh stats bar
   };
 
+  const handleClearData = useCallback(async () => {
+    const confirmed = window.confirm(
+      'Clear all imported browser data and derived recall state? This will remove artifacts, quests, embeddings, and search logs, then let you import again.'
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await clearUserData();
+      setResults([]);
+      setHasSearched(false);
+      setView('wizard');
+      setStatsKey(k => k + 1);
+    } catch (e) {
+      console.error('Clear data error:', e);
+    }
+  }, []);
+
   if (view === 'wizard') {
     return (
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -101,6 +119,13 @@ function App() {
           onClick={() => setView('wizard')}
         >
           ↑ Import
+        </button>
+        <button
+          className="btn btn-ghost btn-danger"
+          style={{ fontSize: '12px', padding: '5px 12px' }}
+          onClick={handleClearData}
+        >
+          Clear
         </button>
       </div>
 

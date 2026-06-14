@@ -72,6 +72,11 @@ export async function getStats(): Promise<DbStats> {
   return invoke<DbStats>('get_stats');
 }
 
+/** Clear imported data and derived recall state so the user can re-import from scratch. */
+export async function clearUserData(): Promise<void> {
+  return invoke<void>('clear_user_data');
+}
+
 /** Recompute Phase 3 normalization metadata for all artifacts. */
 export async function normalizeArtifacts(): Promise<NormalizeStats> {
   return invoke<NormalizeStats>('normalize_artifacts');

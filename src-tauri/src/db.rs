@@ -297,6 +297,31 @@ pub fn find_by_url(conn: &Connection, url: &str) -> Result<Option<String>> {
     }
 }
 
+/// Delete all user-imported data and derived recall state.
+///
+/// This keeps the schema, concept synonyms, and local model cache intact, but
+/// removes imported artifacts, Quest state, embeddings, and search logs so the
+/// user can retry browser import from a clean database.
+///
+/// Runs VACUUM after deletion to reclaim disk space.
+pub fn clear_user_data(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM quest_artifacts", [])?;
+    tx.execute("DELETE FROM quests", [])?;
+    tx.execute("DELETE FROM artifact_embeddings", [])?;
+    tx.execute("DELETE FROM search_log", [])?;
+    tx.execute("DELETE FROM artifacts", [])?;
+    tx.execute(
+        "INSERT INTO artifacts_fts(artifacts_fts) VALUES('rebuild')",
+        [],
+    )?;
+    tx.commit()?;
+
+    // Reclaim disk space from deleted rows. VACUUM must run outside a transaction.
+    conn.execute_batch("VACUUM")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +376,89 @@ mod tests {
             )
             .unwrap();
         assert_eq!(embedding_tables, 1);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn test_clear_user_data_removes_imported_and_derived_rows() {
+        let db_path = temp_db_path();
+        let mut conn = init_db(&db_path).unwrap();
+
+        conn.execute(
+            r#"INSERT INTO artifacts
+                   (id, type, title, url, domain, created_at, visited_at, search_text)
+               VALUES ('a1', 'history', '驾考宝典', 'https://example.com/a1',
+                       'example.com', '2025-01-01T00:00:00', '2025-01-01T00:00:00',
+                       '驾考 宝典')"#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO artifact_embeddings
+                   (artifact_id, model, dims, embedding, updated_at)
+               VALUES ('a1', 'test', 1, X'00000000', '2025-01-01T00:00:00')"#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO quests
+                   (id, name, auto_name, started_at, ended_at, status, created_at, updated_at)
+               VALUES ('q1', NULL, 'Quest', NULL, NULL, 'auto',
+                       '2025-01-01T00:00:00', '2025-01-01T00:00:00')"#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO quest_artifacts
+                   (quest_id, artifact_id, added_at, is_anchor)
+               VALUES ('q1', 'a1', '2025-01-01T00:00:00', 1)"#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO search_log (query, result_ids, created_at)
+               VALUES ('驾考', 'a1', '2025-01-01T00:00:00')"#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO concept_synonyms (term, synonym, weight, source)
+               VALUES ('驾考', '驾驶证考试', 1.0, 'manual')"#,
+            [],
+        )
+        .unwrap();
+
+        clear_user_data(&mut conn).unwrap();
+
+        for table in [
+            "artifacts",
+            "artifact_embeddings",
+            "quests",
+            "quest_artifacts",
+            "search_log",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{} should be empty after clear", table);
+        }
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artifacts_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fts_count, 0);
+
+        let synonym_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM concept_synonyms", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(synonym_count, 1, "manual synonyms should be preserved");
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

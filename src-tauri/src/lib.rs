@@ -168,6 +168,13 @@ fn get_stats(state: State<AppDb>) -> Result<DbStats, String> {
     search::get_stats(&conn).map_err(|e| e.to_string())
 }
 
+/// Clear all imported artifacts and derived local recall data.
+#[tauri::command]
+fn clear_user_data(state: State<AppDb>) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::clear_user_data(&mut conn).map_err(|e| e.to_string())
+}
+
 /// Recompute Phase 3 normalization metadata for all artifacts.
 #[tauri::command]
 fn normalize_artifacts(
@@ -306,6 +313,7 @@ pub fn run() {
             get_context,
             add_note,
             get_stats,
+            clear_user_data,
             normalize_artifacts,
             get_embedding_progress,
             prepare_embeddings,
